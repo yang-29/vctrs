@@ -1,0 +1,25 @@
+[package]
+name = "vctrs"
+version = "0.1.0"
+edition = "2021"
+description = "A fast embedded vector database with Python bindings"
+
+[lib]
+name = "vctrs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+parking_lot = "0.12"
+byteorder = "1"
+simsimd = "6"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
