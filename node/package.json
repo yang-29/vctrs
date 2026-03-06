@@ -1,0 +1,43 @@
+{
+  "name": "vctrs",
+  "version": "0.1.1",
+  "description": "A fast embedded vector database. Rust core, Node.js API.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "vctrs",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl"
+      ]
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yang-29/vctrs"
+  },
+  "keywords": [
+    "vector",
+    "database",
+    "embeddings",
+    "hnsw",
+    "similarity-search",
+    "rag"
+  ],
+  "author": "Stephen Yang",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "devDependencies": {
+    "@napi-rs/cli": "^2"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "prepublishOnly": "napi prepublish -t npm"
+  }
+}

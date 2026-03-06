@@ -1,10 +1,5 @@
-pub mod distance;
-pub mod hnsw;
-pub mod storage;
-pub mod db;
-
-use db::Database;
-use distance::Metric;
+use vctrs_core::db::Database;
+use vctrs_core::distance::Metric;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
@@ -36,7 +31,6 @@ impl PyDatabase {
     }
 
     /// Add a vector with a string id and optional metadata dict.
-    /// Vector can be a list or numpy array.
     #[pyo3(signature = (id, vector, metadata = None))]
     fn add(&self, id: &str, vector: VectorInput<'_>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let vec = vector.to_vec()?;
@@ -46,10 +40,7 @@ impl PyDatabase {
             .map_err(|e| PyValueError::new_err(e))
     }
 
-    /// Add multiple vectors at once. Much faster than calling add() in a loop.
-    /// `ids`: list of string ids
-    /// `vectors`: 2D numpy array (n, dim) or list of lists
-    /// `metadatas`: optional list of dicts
+    /// Batch insert.
     #[pyo3(signature = (ids, vectors, metadatas = None))]
     fn add_many(
         &self,
@@ -62,8 +53,7 @@ impl PyDatabase {
         if ids.len() != vecs.len() {
             return Err(PyValueError::new_err(format!(
                 "ids length ({}) != vectors length ({})",
-                ids.len(),
-                vecs.len()
+                ids.len(), vecs.len()
             )));
         }
 
@@ -72,8 +62,7 @@ impl PyDatabase {
                 if list.len() != ids.len() {
                     return Err(PyValueError::new_err(format!(
                         "metadatas length ({}) != ids length ({})",
-                        list.len(),
-                        ids.len()
+                        list.len(), ids.len()
                     )));
                 }
                 list.iter()
@@ -91,10 +80,7 @@ impl PyDatabase {
             None => vec![None; ids.len()],
         };
 
-        let items: Vec<_> = ids
-            .into_iter()
-            .zip(vecs)
-            .zip(metas)
+        let items: Vec<_> = ids.into_iter().zip(vecs).zip(metas)
             .map(|((id, vec), meta)| (id, vec, meta))
             .collect();
 
@@ -103,9 +89,6 @@ impl PyDatabase {
     }
 
     /// Search for the k nearest neighbors.
-    /// Returns list of (id, distance, metadata).
-    /// Query can be a list or numpy array.
-    /// ef_search: optional quality/speed tradeoff (higher = better recall, slower).
     #[pyo3(signature = (vector, k = 10, ef_search = None))]
     fn search(&self, vector: VectorInput<'_>, k: usize, ef_search: Option<usize>) -> PyResult<Vec<(String, f32, Option<PyObject>)>> {
         let vec = vector.to_vec()?;
@@ -113,8 +96,7 @@ impl PyDatabase {
             .map_err(|e| PyValueError::new_err(e))?;
 
         Python::with_gil(|py| {
-            results
-                .into_iter()
+            results.into_iter()
                 .map(|r| {
                     let meta = r.metadata.map(|m| json_to_pyobject(py, &m));
                     Ok((r.id, r.distance, meta))
@@ -134,10 +116,9 @@ impl PyDatabase {
         })
     }
 
-    /// Delete a vector by id. Returns True if it existed.
+    /// Delete a vector by id.
     fn delete(&self, id: &str) -> PyResult<bool> {
-        self.inner.delete(id)
-            .map_err(|e| PyValueError::new_err(e))
+        self.inner.delete(id).map_err(|e| PyValueError::new_err(e))
     }
 
     /// Update a vector's data and/or metadata.
@@ -155,29 +136,24 @@ impl PyDatabase {
             .map_err(|e| PyValueError::new_err(e))
     }
 
-    /// Check if an id exists.
     fn __contains__(&self, id: &str) -> bool {
         self.inner.contains(id)
     }
 
-    /// Persist the database to disk.
     fn save(&self) -> PyResult<()> {
         self.inner.save().map_err(|e| PyValueError::new_err(e))
     }
 
-    /// Number of vectors in the database.
     fn __len__(&self) -> usize {
         self.inner.len()
     }
 
-    /// Dimensionality of vectors.
     #[getter]
     fn dim(&self) -> usize {
         self.inner.dim()
     }
 }
 
-/// Accept either a Python list or a numpy array as vector input.
 #[derive(FromPyObject)]
 enum VectorInput<'py> {
     List(Vec<f32>),
@@ -193,7 +169,6 @@ impl VectorInput<'_> {
     }
 }
 
-/// Accept either a list of lists or a 2D numpy array for batch input.
 #[derive(FromPyObject)]
 enum BatchVectorInput<'py> {
     Numpy(PyReadonlyArray2<'py, f32>),
@@ -209,33 +184,24 @@ impl BatchVectorInput<'_> {
                 let n = shape[0];
                 let dim = shape[1];
                 let slice = arr.as_slice()?;
-                Ok((0..n)
-                    .map(|i| slice[i * dim..(i + 1) * dim].to_vec())
-                    .collect())
+                Ok((0..n).map(|i| slice[i * dim..(i + 1) * dim].to_vec()).collect())
             }
         }
     }
 }
 
-/// Convert a Python dict to a serde_json::Value.
 fn pythonize_dict(dict: &Bound<'_, PyDict>) -> PyResult<serde_json::Value> {
     let py = dict.py();
     let json_module = py.import_bound("json")?;
-    let json_str: String = json_module
-        .call_method1("dumps", (dict,))?
-        .extract()?;
+    let json_str: String = json_module.call_method1("dumps", (dict,))?.extract()?;
     serde_json::from_str(&json_str)
         .map_err(|e| PyValueError::new_err(format!("invalid metadata: {}", e)))
 }
 
-/// Convert a serde_json::Value to a Python object.
 fn json_to_pyobject(py: Python<'_>, value: &serde_json::Value) -> PyObject {
     let json_module = py.import_bound("json").unwrap();
     let json_str = serde_json::to_string(value).unwrap();
-    json_module
-        .call_method1("loads", (json_str,))
-        .unwrap()
-        .to_object(py)
+    json_module.call_method1("loads", (json_str,)).unwrap().to_object(py)
 }
 
 #[pymodule]

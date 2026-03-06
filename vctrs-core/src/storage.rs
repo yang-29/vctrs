@@ -32,15 +32,13 @@ pub struct MetaRecord {
 pub struct Storage {
     data_path: PathBuf,
     graph_path: PathBuf,
-    dim: usize,
 }
 
 impl Storage {
-    pub fn new(dir: &Path, dim: usize) -> Self {
+    pub fn new(dir: &Path, _dim: usize) -> Self {
         Storage {
             data_path: dir.join("meta.vctrs"),
             graph_path: dir.join("graph.vctrs"),
-            dim,
         }
     }
 

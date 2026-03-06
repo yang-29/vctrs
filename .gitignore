@@ -6,3 +6,6 @@ __pycache__/
 *.egg-info/
 dist/
 .venv/
+node/node_modules/
+node/*.node
+*.d.ts
