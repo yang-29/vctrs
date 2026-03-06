@@ -1,31 +1,19 @@
-/// On-disk storage for vectors and metadata.
+/// On-disk storage for vectors, metadata, and HNSW graph.
 ///
-/// File format:
-///   [header: 16 bytes]
-///   [record]*
-///
-/// Header:
-///   magic: u32 = 0x56435452 ("VCTR")
-///   version: u32 = 1
-///   dim: u32
-///   count: u32
-///
-/// Record:
-///   id_len: u32
-///   id: [u8; id_len]        (the string id)
-///   vector: [f32; dim]
-///   meta_len: u32
-///   metadata: [u8; meta_len] (JSON bytes)
+/// Two files:
+///   data.vctrs  — string ids + metadata (small, human-relevant)
+///   graph.vctrs — vectors + full HNSW graph structure (fast to load)
 
+use crate::hnsw::HnswIndex;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
-const MAGIC: u32 = 0x56435452;
-const VERSION: u32 = 1;
+const META_MAGIC: u32 = 0x56435452;
+const META_VERSION: u32 = 2; // v2: id mapping + metadata only (graph is separate)
 
-/// A stored record: string id -> vector + metadata.
+/// A stored record: string id -> metadata (vectors live in the graph file).
 #[derive(Clone, Debug)]
 pub struct Record {
     pub string_id: String,
@@ -33,87 +21,162 @@ pub struct Record {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Manages reading/writing the database file.
+/// Metadata-only record (for the new format where graph stores vectors).
+#[derive(Clone, Debug)]
+pub struct MetaRecord {
+    pub internal_id: u32,
+    pub string_id: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
 pub struct Storage {
-    path: PathBuf,
+    data_path: PathBuf,
+    graph_path: PathBuf,
     dim: usize,
 }
 
 impl Storage {
-    pub fn new(path: &Path, dim: usize) -> Self {
+    pub fn new(dir: &Path, dim: usize) -> Self {
         Storage {
-            path: path.to_path_buf(),
+            data_path: dir.join("meta.vctrs"),
+            graph_path: dir.join("graph.vctrs"),
             dim,
         }
     }
 
-    /// Save all records to disk (full rewrite).
-    pub fn save(&self, records: &[Record]) -> io::Result<()> {
-        let tmp_path = self.path.with_extension("tmp");
+    /// Check if a saved database exists at this path.
+    pub fn exists(&self) -> bool {
+        self.graph_path.exists()
+    }
+
+    /// Save the HNSW graph + metadata to disk.
+    pub fn save_full(
+        &self,
+        index: &HnswIndex,
+        meta_records: &[MetaRecord],
+    ) -> io::Result<()> {
+        // Ensure parent directory exists.
+        if let Some(parent) = self.graph_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Save graph (vectors + HNSW structure).
+        let graph_tmp = self.graph_path.with_extension("tmp");
         {
-            let file = File::create(&tmp_path)?;
-            let mut w = BufWriter::new(file);
+            let mut f = File::create(&graph_tmp)?;
+            index.save_graph(&mut f)?;
+        }
+        fs::rename(&graph_tmp, &self.graph_path)?;
 
-            // Header.
-            w.write_u32::<LittleEndian>(MAGIC)?;
-            w.write_u32::<LittleEndian>(VERSION)?;
-            w.write_u32::<LittleEndian>(self.dim as u32)?;
-            w.write_u32::<LittleEndian>(records.len() as u32)?;
+        // Save metadata (string ids + JSON metadata).
+        let meta_tmp = self.data_path.with_extension("tmp");
+        {
+            let f = File::create(&meta_tmp)?;
+            let mut w = BufWriter::new(f);
 
-            // Records.
-            for record in records {
-                let id_bytes = record.string_id.as_bytes();
+            w.write_u32::<LittleEndian>(META_MAGIC)?;
+            w.write_u32::<LittleEndian>(META_VERSION)?;
+            w.write_u32::<LittleEndian>(meta_records.len() as u32)?;
+
+            for rec in meta_records {
+                w.write_u32::<LittleEndian>(rec.internal_id)?;
+                let id_bytes = rec.string_id.as_bytes();
                 w.write_u32::<LittleEndian>(id_bytes.len() as u32)?;
                 w.write_all(id_bytes)?;
 
-                for &val in &record.vector {
-                    w.write_f32::<LittleEndian>(val)?;
-                }
-
-                let meta_bytes = match &record.metadata {
+                let meta_bytes = match &rec.metadata {
                     Some(m) => serde_json::to_vec(m).unwrap_or_default(),
                     None => Vec::new(),
                 };
                 w.write_u32::<LittleEndian>(meta_bytes.len() as u32)?;
                 w.write_all(&meta_bytes)?;
             }
-
             w.flush()?;
         }
+        fs::rename(&meta_tmp, &self.data_path)?;
 
-        // Atomic rename for crash safety.
-        fs::rename(&tmp_path, &self.path)?;
         Ok(())
     }
 
-    /// Load all records from disk.
-    pub fn load(&self) -> io::Result<Vec<Record>> {
-        if !self.path.exists() {
+    /// Load the HNSW graph from disk.
+    pub fn load_graph(&self) -> io::Result<HnswIndex> {
+        let mut f = File::open(&self.graph_path)?;
+        HnswIndex::load_graph(&mut f)
+    }
+
+    /// Load metadata records from disk.
+    pub fn load_meta(&self) -> io::Result<Vec<MetaRecord>> {
+        if !self.data_path.exists() {
             return Ok(Vec::new());
         }
 
-        let file = File::open(&self.path)?;
-        let mut r = BufReader::new(file);
+        let f = File::open(&self.data_path)?;
+        let mut r = BufReader::new(f);
 
-        // Header.
         let magic = r.read_u32::<LittleEndian>()?;
-        if magic != MAGIC {
+        if magic != META_MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad meta magic"));
+        }
+        let version = r.read_u32::<LittleEndian>()?;
+        if version != META_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported meta version: {}", version),
+            ));
+        }
+        let count = r.read_u32::<LittleEndian>()? as usize;
+
+        let mut records = Vec::with_capacity(count);
+        for _ in 0..count {
+            let internal_id = r.read_u32::<LittleEndian>()?;
+            let id_len = r.read_u32::<LittleEndian>()? as usize;
+            let mut id_bytes = vec![0u8; id_len];
+            r.read_exact(&mut id_bytes)?;
+            let string_id = String::from_utf8(id_bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+            let meta_len = r.read_u32::<LittleEndian>()? as usize;
+            let metadata = if meta_len > 0 {
+                let mut meta_bytes = vec![0u8; meta_len];
+                r.read_exact(&mut meta_bytes)?;
+                serde_json::from_slice(&meta_bytes).ok()
+            } else {
+                None
+            };
+
+            records.push(MetaRecord {
+                internal_id,
+                string_id,
+                metadata,
+            });
+        }
+
+        Ok(records)
+    }
+
+    // -- Legacy v1 support (for migrating old databases) ----------------------
+
+    /// Try loading legacy v1 format (vectors + metadata in single file).
+    pub fn load_legacy(&self, legacy_path: &Path) -> io::Result<Vec<Record>> {
+        if !legacy_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let f = File::open(legacy_path)?;
+        let mut r = BufReader::new(f);
+
+        let magic = r.read_u32::<LittleEndian>()?;
+        if magic != META_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
         }
         let version = r.read_u32::<LittleEndian>()?;
-        if version != VERSION {
+        if version != 1 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unsupported version: {}", version),
+                "not a v1 file",
             ));
         }
         let dim = r.read_u32::<LittleEndian>()? as usize;
-        if dim != self.dim {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("dimension mismatch: file={}, expected={}", dim, self.dim),
-            ));
-        }
         let count = r.read_u32::<LittleEndian>()? as usize;
 
         let mut records = Vec::with_capacity(count);
@@ -152,40 +215,42 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::distance::Metric;
 
     #[test]
-    fn test_save_load_roundtrip() {
+    fn test_graph_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.vctrs");
-        let storage = Storage::new(&path, 3);
+        let storage = Storage::new(dir.path(), 3);
 
-        let records = vec![
-            Record {
-                string_id: "doc1".to_string(),
-                vector: vec![1.0, 2.0, 3.0],
-                metadata: Some(serde_json::json!({"title": "hello"})),
+        let mut index = HnswIndex::new(3, Metric::Cosine, 16, 200);
+        index.insert(vec![1.0, 0.0, 0.0]);
+        index.insert(vec![0.0, 1.0, 0.0]);
+
+        let meta_records = vec![
+            MetaRecord {
+                internal_id: 0,
+                string_id: "a".to_string(),
+                metadata: Some(serde_json::json!({"x": 1})),
             },
-            Record {
-                string_id: "doc2".to_string(),
-                vector: vec![4.0, 5.0, 6.0],
+            MetaRecord {
+                internal_id: 1,
+                string_id: "b".to_string(),
                 metadata: None,
             },
         ];
 
-        storage.save(&records).unwrap();
-        let loaded = storage.load().unwrap();
+        storage.save_full(&index, &meta_records).unwrap();
 
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].string_id, "doc1");
-        assert_eq!(loaded[0].vector, vec![1.0, 2.0, 3.0]);
-        assert_eq!(loaded[1].string_id, "doc2");
-        assert!(loaded[1].metadata.is_none());
-    }
+        // Load back.
+        let loaded_index = storage.load_graph().unwrap();
+        let loaded_meta = storage.load_meta().unwrap();
 
-    #[test]
-    fn test_load_nonexistent() {
-        let storage = Storage::new(Path::new("/tmp/nonexistent_vctrs_test.vctrs"), 3);
-        let records = storage.load().unwrap();
-        assert!(records.is_empty());
+        assert_eq!(loaded_index.len(), 2);
+        assert_eq!(loaded_meta.len(), 2);
+        assert_eq!(loaded_meta[0].string_id, "a");
+
+        // Search should work.
+        let results = loaded_index.search(&[1.0, 0.0, 0.0], 1, 50);
+        assert_eq!(results[0].0, 0);
     }
 }

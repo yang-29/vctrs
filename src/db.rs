@@ -2,27 +2,20 @@
 
 use crate::distance::Metric;
 use crate::hnsw::HnswIndex;
-use crate::storage::{Record, Storage};
+use crate::storage::{MetaRecord, Storage};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct Database {
-    /// HNSW index for fast search.
     index: RwLock<HnswIndex>,
-    /// Map from string id -> internal id.
     id_map: RwLock<HashMap<String, u32>>,
-    /// Map from internal id -> string id (empty string = deleted).
     reverse_map: RwLock<Vec<String>>,
-    /// Metadata for each vector, indexed by internal id.
     metadata: RwLock<Vec<Option<serde_json::Value>>>,
-    /// Persistent storage.
     storage: Storage,
-    /// Dimensionality.
     dim: usize,
 }
 
-/// A search result returned to the user.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub id: String,
@@ -31,28 +24,56 @@ pub struct SearchResult {
 }
 
 impl Database {
-    /// Open or create a database at the given path.
     pub fn open(path: &str, dim: usize, metric: Metric) -> Result<Self, String> {
         let db_path = PathBuf::from(path);
-
-        // Create directory if needed.
         std::fs::create_dir_all(&db_path).map_err(|e| e.to_string())?;
 
-        let data_path = db_path.join("data.vctrs");
-        let storage = Storage::new(&data_path, dim);
+        let storage = Storage::new(&db_path, dim);
+
+        if storage.exists() {
+            // Fast path: load pre-built graph (no rebuild needed).
+            let index = storage.load_graph().map_err(|e| e.to_string())?;
+            let meta_records = storage.load_meta().map_err(|e| e.to_string())?;
+
+            let mut id_map = HashMap::with_capacity(meta_records.len());
+            let total_slots = index.total_slots();
+            let mut reverse_map = vec![String::new(); total_slots];
+            let mut metadata = vec![None; total_slots];
+
+            for rec in meta_records {
+                id_map.insert(rec.string_id.clone(), rec.internal_id);
+                reverse_map[rec.internal_id as usize] = rec.string_id;
+                metadata[rec.internal_id as usize] = rec.metadata;
+            }
+
+            return Ok(Database {
+                index: RwLock::new(index),
+                id_map: RwLock::new(id_map),
+                reverse_map: RwLock::new(reverse_map),
+                metadata: RwLock::new(metadata),
+                storage,
+                dim,
+            });
+        }
+
+        // Try legacy v1 format.
+        let legacy_path = db_path.join("data.vctrs");
+        let legacy_records = storage.load_legacy(&legacy_path).unwrap_or_default();
 
         let mut index = HnswIndex::new(dim, metric, 16, 200);
         let mut id_map = HashMap::new();
         let mut reverse_map = Vec::new();
         let mut meta = Vec::new();
 
-        // Load existing data if present.
-        let records = storage.load().map_err(|e| e.to_string())?;
-        for record in &records {
-            let internal_id = index.insert(record.vector.clone());
-            id_map.insert(record.string_id.clone(), internal_id);
-            reverse_map.push(record.string_id.clone());
-            meta.push(record.metadata.clone());
+        if !legacy_records.is_empty() {
+            // Batch insert for speed.
+            let vecs: Vec<Vec<f32>> = legacy_records.iter().map(|r| r.vector.clone()).collect();
+            let ids = index.batch_insert(vecs);
+            for (i, record) in legacy_records.iter().enumerate() {
+                id_map.insert(record.string_id.clone(), ids[i]);
+                reverse_map.push(record.string_id.clone());
+                meta.push(record.metadata.clone());
+            }
         }
 
         Ok(Database {
@@ -65,7 +86,6 @@ impl Database {
         })
     }
 
-    /// Add a vector with a string id and optional metadata.
     pub fn add(
         &self,
         id: &str,
@@ -95,13 +115,11 @@ impl Database {
         Ok(())
     }
 
-    /// Add multiple vectors at once. More efficient than calling add() in a loop
-    /// because it holds the write lock for the entire batch.
+    /// Batch insert — uses parallel HNSW construction.
     pub fn add_many(
         &self,
         items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
     ) -> Result<(), String> {
-        // Validate all dimensions first.
         for (id, vector, _) in &items {
             if vector.len() != self.dim {
                 return Err(format!(
@@ -112,24 +130,47 @@ impl Database {
         }
 
         let mut id_map = self.id_map.write();
+        for (id, _, _) in &items {
+            if id_map.contains_key(id) {
+                return Err(format!("id '{}' already exists", id));
+            }
+        }
+
+        let (ids_vec, vecs, metas): (Vec<_>, Vec<_>, Vec<_>) = items
+            .into_iter()
+            .map(|(id, vec, meta)| (id, vec, meta))
+            .fold(
+                (Vec::new(), Vec::new(), Vec::new()),
+                |(mut ids, mut vecs, mut metas), (id, vec, meta)| {
+                    ids.push(id);
+                    vecs.push(vec);
+                    metas.push(meta);
+                    (ids, vecs, metas)
+                },
+            );
+
         let mut index = self.index.write();
+        let internal_ids = index.batch_insert(vecs);
+
         let mut reverse_map = self.reverse_map.write();
         let mut metadata = self.metadata.write();
 
-        for (id, vector, meta) in items {
-            if id_map.contains_key(&id) {
-                return Err(format!("id '{}' already exists", id));
+        for (i, id) in ids_vec.into_iter().enumerate() {
+            id_map.insert(id.clone(), internal_ids[i]);
+            // Ensure reverse_map is big enough.
+            while reverse_map.len() <= internal_ids[i] as usize {
+                reverse_map.push(String::new());
             }
-            let internal_id = index.insert(vector);
-            id_map.insert(id.clone(), internal_id);
-            reverse_map.push(id);
-            metadata.push(meta);
+            reverse_map[internal_ids[i] as usize] = id;
+            while metadata.len() <= internal_ids[i] as usize {
+                metadata.push(None);
+            }
+            metadata[internal_ids[i] as usize] = metas[i].clone();
         }
 
         Ok(())
     }
 
-    /// Delete a vector by string id. Returns true if it existed.
     pub fn delete(&self, id: &str) -> Result<bool, String> {
         let mut id_map = self.id_map.write();
         let internal_id = match id_map.remove(id) {
@@ -140,14 +181,12 @@ impl Database {
         let mut index = self.index.write();
         index.mark_deleted(internal_id);
 
-        // Clear the reverse map entry (keep slot to preserve indices).
         self.reverse_map.write()[internal_id as usize] = String::new();
         self.metadata.write()[internal_id as usize] = None;
 
         Ok(true)
     }
 
-    /// Update a vector's data and/or metadata. The id must already exist.
     pub fn update(
         &self,
         id: &str,
@@ -177,7 +216,6 @@ impl Database {
         Ok(())
     }
 
-    /// Search for the k nearest neighbors.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>, String> {
         if query.len() != self.dim {
             return Err(format!(
@@ -206,7 +244,6 @@ impl Database {
         Ok(results)
     }
 
-    /// Get a vector and its metadata by string id.
     pub fn get(&self, id: &str) -> Result<(Vec<f32>, Option<serde_json::Value>), String> {
         let id_map = self.id_map.read();
         let internal_id = id_map
@@ -225,12 +262,10 @@ impl Database {
         Ok((vector, meta))
     }
 
-    /// Check if an id exists in the database.
     pub fn contains(&self, id: &str) -> bool {
         self.id_map.read().contains_key(id)
     }
 
-    /// Number of vectors in the database.
     pub fn len(&self) -> usize {
         self.index.read().len()
     }
@@ -239,26 +274,24 @@ impl Database {
         self.len() == 0
     }
 
-    /// Persist current state to disk. Only saves non-deleted vectors.
+    /// Persist to disk — saves the full HNSW graph so load is instant.
     pub fn save(&self) -> Result<(), String> {
         let index = self.index.read();
         let id_map = self.id_map.read();
         let metadata = self.metadata.read();
 
-        let mut records = Vec::with_capacity(id_map.len());
-        for (string_id, &internal_id) in id_map.iter() {
-            let vector = index
-                .get_vector(internal_id)
-                .ok_or_else(|| "internal error".to_string())?
-                .to_vec();
-            records.push(Record {
+        let meta_records: Vec<MetaRecord> = id_map
+            .iter()
+            .map(|(string_id, &internal_id)| MetaRecord {
+                internal_id,
                 string_id: string_id.clone(),
-                vector,
                 metadata: metadata[internal_id as usize].clone(),
-            });
-        }
+            })
+            .collect();
 
-        self.storage.save(&records).map_err(|e| e.to_string())
+        self.storage
+            .save_full(&index, &meta_records)
+            .map_err(|e| e.to_string())
     }
 
     pub fn dim(&self) -> usize {
@@ -286,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn test_persistence() {
+    fn test_persistence_with_graph() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("testdb");
 
@@ -303,6 +336,10 @@ mod tests {
             let (vec, meta) = db.get("x").unwrap();
             assert_eq!(vec, vec![1.0, 2.0]);
             assert!(meta.is_some());
+
+            // Search should work on loaded graph.
+            let results = db.search(&[1.0, 2.0], 1).unwrap();
+            assert_eq!(results[0].id, "x");
         }
     }
 
@@ -332,7 +369,6 @@ mod tests {
         assert_eq!(db.len(), 2);
         assert!(!db.contains("b"));
 
-        // Search should not return deleted vector.
         let results = db.search(&[0.0, 1.0, 0.0], 3).unwrap();
         assert!(results.iter().all(|r| r.id != "b"));
     }
@@ -345,13 +381,11 @@ mod tests {
 
         db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"v": 1}))).unwrap();
 
-        // Update vector only.
         db.update("a", Some(vec![0.0, 1.0]), None).unwrap();
         let (vec, meta) = db.get("a").unwrap();
         assert_eq!(vec, vec![0.0, 1.0]);
-        assert_eq!(meta.unwrap()["v"], 1); // metadata unchanged
+        assert_eq!(meta.unwrap()["v"], 1);
 
-        // Update metadata only.
         db.update("a", None, Some(Some(serde_json::json!({"v": 2})))).unwrap();
         let (_, meta) = db.get("a").unwrap();
         assert_eq!(meta.unwrap()["v"], 2);

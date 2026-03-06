@@ -17,6 +17,7 @@ rand = "0.8"
 parking_lot = "0.12"
 byteorder = "1"
 simsimd = "6"
+rayon = "1"
 
 [dev-dependencies]
 tempfile = "3"
