@@ -4,9 +4,25 @@ build-backend = "maturin"
 
 [project]
 name = "vctrs"
-version = "0.1.0"
-description = "A fast embedded vector database"
+version = "0.1.1"
+description = "A fast embedded vector database. Rust core, Python API. 4-10x faster than ChromaDB."
 requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "Stephen Yang"}]
+keywords = ["vector", "database", "embeddings", "hnsw", "similarity-search", "rag"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+readme = "README.md"
+
+[project.urls]
+Repository = "https://github.com/yang-29/vctrs"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
