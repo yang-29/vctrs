@@ -216,7 +216,15 @@ impl Database {
         Ok(())
     }
 
-    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>, String> {
+    /// Search for the k nearest neighbors.
+    /// ef_search controls the search quality/speed tradeoff. Higher = better recall, slower.
+    /// If None, uses an adaptive formula based on k.
+    pub fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> Result<Vec<SearchResult>, String> {
         if query.len() != self.dim {
             return Err(format!(
                 "dimension mismatch: expected {}, got {}",
@@ -229,8 +237,13 @@ impl Database {
         let reverse_map = self.reverse_map.read();
         let metadata = self.metadata.read();
 
-        let ef_search = (k * 2).max(50);
-        let raw_results = index.search(query, k, ef_search);
+        // Adaptive ef: sublinear scaling. At k=10 ef=50, k=100 ef=120, k=1000 ef=200.
+        let ef = ef_search.unwrap_or_else(|| {
+            let base = 50usize;
+            let extra = ((k as f64).sqrt() * 10.0) as usize;
+            base.max(k + extra)
+        });
+        let raw_results = index.search(query, k, ef);
 
         let results = raw_results
             .into_iter()
@@ -313,7 +326,7 @@ mod tests {
         db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
         db.add("c", vec![0.0, 0.0, 1.0], None).unwrap();
 
-        let results = db.search(&[0.9, 0.1, 0.0], 2).unwrap();
+        let results = db.search(&[0.9, 0.1, 0.0], 2, None).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "a");
     }
@@ -338,7 +351,7 @@ mod tests {
             assert!(meta.is_some());
 
             // Search should work on loaded graph.
-            let results = db.search(&[1.0, 2.0], 1).unwrap();
+            let results = db.search(&[1.0, 2.0], 1, None).unwrap();
             assert_eq!(results[0].id, "x");
         }
     }
@@ -369,7 +382,7 @@ mod tests {
         assert_eq!(db.len(), 2);
         assert!(!db.contains("b"));
 
-        let results = db.search(&[0.0, 1.0, 0.0], 3).unwrap();
+        let results = db.search(&[0.0, 1.0, 0.0], 3, None).unwrap();
         assert!(results.iter().all(|r| r.id != "b"));
     }
 
@@ -405,7 +418,7 @@ mod tests {
         db.add_many(items).unwrap();
         assert_eq!(db.len(), 3);
 
-        let results = db.search(&[1.0, 0.0], 1).unwrap();
+        let results = db.search(&[1.0, 0.0], 1, None).unwrap();
         assert_eq!(results[0].id, "a");
     }
 

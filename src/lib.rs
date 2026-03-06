@@ -105,10 +105,11 @@ impl PyDatabase {
     /// Search for the k nearest neighbors.
     /// Returns list of (id, distance, metadata).
     /// Query can be a list or numpy array.
-    #[pyo3(signature = (vector, k = 10))]
-    fn search(&self, vector: VectorInput<'_>, k: usize) -> PyResult<Vec<(String, f32, Option<PyObject>)>> {
+    /// ef_search: optional quality/speed tradeoff (higher = better recall, slower).
+    #[pyo3(signature = (vector, k = 10, ef_search = None))]
+    fn search(&self, vector: VectorInput<'_>, k: usize, ef_search: Option<usize>) -> PyResult<Vec<(String, f32, Option<PyObject>)>> {
         let vec = vector.to_vec()?;
-        let results = self.inner.search(&vec, k)
+        let results = self.inner.search(&vec, k, ef_search)
             .map_err(|e| PyValueError::new_err(e))?;
 
         Python::with_gil(|py| {

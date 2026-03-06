@@ -11,7 +11,8 @@ use parking_lot::Mutex;
 use rand::Rng;
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BinaryHeap;
+use std::collections::HashSet;
 use std::io::{self, Read as IoRead, Write as IoWrite};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
@@ -340,6 +341,7 @@ impl HnswIndex {
     }
 
     fn search_layer(&self, query: &[f32], entry: u32, ef: usize, layer: usize) -> Vec<Candidate> {
+        let total = self.vectors.len();
         let entry_dist = distance(query, &self.vectors[entry as usize], self.metric);
 
         let mut candidates = BinaryHeap::new();
@@ -354,8 +356,9 @@ impl HnswIndex {
             dist: entry_dist,
         });
 
-        let mut visited = HashSet::new();
-        visited.insert(entry);
+        // Bit vector for visited nodes — much faster than HashSet for sequential u32 ids.
+        let mut visited = vec![false; total];
+        visited[entry as usize] = true;
 
         while let Some(current) = candidates.pop() {
             let farthest_dist = results.peek().map(|r| r.dist).unwrap_or(f32::MAX);
@@ -368,16 +371,16 @@ impl HnswIndex {
                 continue;
             }
 
-            // Snapshot the neighbor list (short lock hold).
-            let neighbor_ids: Vec<u32> = node.neighbors[layer].lock().clone();
-
-            for neighbor_id in neighbor_ids {
-                if visited.contains(&neighbor_id) {
+            // Process neighbors under lock — no clone needed, just read u32s.
+            let nb = node.neighbors[layer].lock();
+            for &neighbor_id in nb.iter() {
+                let nid = neighbor_id as usize;
+                if visited[nid] {
                     continue;
                 }
-                visited.insert(neighbor_id);
+                visited[nid] = true;
 
-                let d = distance(query, &self.vectors[neighbor_id as usize], self.metric);
+                let d = distance(query, &self.vectors[nid], self.metric);
                 let farthest_dist = results.peek().map(|r| r.dist).unwrap_or(f32::MAX);
 
                 if d < farthest_dist || results.len() < ef {
