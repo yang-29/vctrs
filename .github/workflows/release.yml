@@ -12,11 +12,12 @@ jobs:
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
           - runner: ubuntu-latest
             target: x86_64
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04-arm
             target: aarch64
     steps:
       - uses: actions/checkout@v4
@@ -38,11 +39,12 @@ jobs:
   macos:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
+      fail-fast: false
       matrix:
         platform:
-          - runner: macos-13
+          - runner: macos-latest
             target: x86_64
-          - runner: macos-14
+          - runner: macos-latest
             target: aarch64
     steps:
       - uses: actions/checkout@v4
@@ -62,22 +64,18 @@ jobs:
   # Build wheels for Windows
   windows:
     runs-on: windows-latest
-    strategy:
-      matrix:
-        target: [x64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          architecture: ${{ matrix.target }}
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-windows-${{ matrix.target }}
+          name: wheels-windows-x64
           path: dist
 
   # Build source distribution
@@ -104,7 +102,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/vctrs
     permissions:
-      id-token: write  # trusted publishing
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with:
