@@ -1,6 +1,6 @@
 [package]
 name = "vctrs-node"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Node.js bindings for vctrs embedded vector database"
 
