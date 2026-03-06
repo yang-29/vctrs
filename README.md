@@ -61,26 +61,19 @@ results = db.search(query, k=10, ef_search=300)
 
 ## Benchmarks
 
-All benchmarks on Apple M-series, 384 dimensions (typical embedding size).
+100,000 vectors, 384 dimensions, Apple M-series:
 
-### Search speed (100k vectors)
+### Speed
 
-| Operation | vctrs | numpy brute-force | Speedup |
-|-----------|-------|-------------------|---------|
-| Search k=10 | **1.07ms** | 4.62ms | **4.3x** |
+| Operation | vctrs | ChromaDB | numpy brute-force |
+|-----------|-------|----------|-------------------|
+| **Insert 100k** | 39s | 70s | — |
+| **Search k=10** | **0.89ms** | 2.04ms | 3.44ms |
+| **Search k=100** | **0.72ms** | 2.49ms | — |
+| **Load from disk** | 323ms | — | — |
+| **Get by id** | <0.01ms | — | — |
 
-HNSW's advantage grows with dataset size — at 1M+ vectors the gap is 50-100x.
-
-### vs ChromaDB (10k vectors)
-
-| Operation | vctrs | ChromaDB | Speedup |
-|-----------|-------|----------|---------|
-| Insert 10k | 807ms | 3,451ms | **4.3x** |
-| Search k=10 | 0.62ms | 2.02ms | **3.2x** |
-| Search k=100 | 0.56ms | 2.13ms | **3.8x** |
-| Search k=500 | 1.32ms | 5.44ms | **4.1x** |
-| Load from disk | 24ms | — | instant |
-| Get by id | <0.01ms | — | instant |
+3-4x faster than ChromaDB on search, 4x faster than numpy brute-force.
 
 ### Recall (search quality)
 
