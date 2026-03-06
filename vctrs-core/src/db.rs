@@ -31,9 +31,8 @@ impl Database {
         let storage = Storage::new(&db_path, dim);
 
         if storage.exists() {
-            // Fast path: load pre-built graph (no rebuild needed).
-            let index = storage.load_graph().map_err(|e| e.to_string())?;
-            let meta_records = storage.load_meta().map_err(|e| e.to_string())?;
+            // Fast path: load from single db.vctrs file.
+            let (index, meta_records) = storage.load().map_err(|e| e.to_string())?;
 
             let mut id_map = HashMap::with_capacity(meta_records.len());
             let total_slots = index.total_slots();
@@ -56,23 +55,22 @@ impl Database {
             });
         }
 
-        // Try legacy v1 format.
-        let legacy_path = db_path.join("data.vctrs");
-        let legacy_records = storage.load_legacy(&legacy_path).unwrap_or_default();
-
+        // Try legacy formats (v1 data.vctrs or v2 split files).
         let mut index = HnswIndex::new(dim, metric, 16, 200);
         let mut id_map = HashMap::new();
         let mut reverse_map = Vec::new();
         let mut meta = Vec::new();
 
-        if !legacy_records.is_empty() {
-            // Batch insert for speed.
-            let vecs: Vec<Vec<f32>> = legacy_records.iter().map(|r| r.vector.clone()).collect();
-            let ids = index.batch_insert(vecs);
-            for (i, record) in legacy_records.iter().enumerate() {
-                id_map.insert(record.string_id.clone(), ids[i]);
-                reverse_map.push(record.string_id.clone());
-                meta.push(record.metadata.clone());
+        if let Some(legacy_path) = storage.legacy_path() {
+            let legacy_records = storage.load_legacy_v1(&legacy_path).unwrap_or_default();
+            if !legacy_records.is_empty() {
+                let vecs: Vec<Vec<f32>> = legacy_records.iter().map(|r| r.vector.clone()).collect();
+                let ids = index.batch_insert(vecs);
+                for (i, record) in legacy_records.iter().enumerate() {
+                    id_map.insert(record.string_id.clone(), ids[i]);
+                    reverse_map.push(record.string_id.clone());
+                    meta.push(record.metadata.clone());
+                }
             }
         }
 
@@ -304,7 +302,7 @@ impl Database {
             .collect();
 
         self.storage
-            .save_full(&index, &meta_records)
+            .save(&index, &meta_records)
             .map_err(|e| e.to_string())
     }
 

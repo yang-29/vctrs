@@ -489,59 +489,59 @@ impl HnswIndex {
     const GRAPH_VERSION: u32 = 1;
 
     pub fn save_graph<W: IoWrite>(&self, w: &mut W) -> io::Result<()> {
-        let mut bw = io::BufWriter::new(w);
-
-        bw.write_u32::<LittleEndian>(Self::GRAPH_MAGIC)?;
-        bw.write_u32::<LittleEndian>(Self::GRAPH_VERSION)?;
-        bw.write_u32::<LittleEndian>(self.dim as u32)?;
-        bw.write_u8(match self.metric {
+        // Note: caller should wrap in BufWriter. We don't buffer here
+        // so the caller can append more data after save_graph returns.
+        w.write_u32::<LittleEndian>(Self::GRAPH_MAGIC)?;
+        w.write_u32::<LittleEndian>(Self::GRAPH_VERSION)?;
+        w.write_u32::<LittleEndian>(self.dim as u32)?;
+        w.write_u8(match self.metric {
             Metric::Cosine => 0,
             Metric::Euclidean => 1,
             Metric::DotProduct => 2,
         })?;
-        bw.write_u32::<LittleEndian>(self.m as u32)?;
-        bw.write_u32::<LittleEndian>(self.ef_construction as u32)?;
-        bw.write_u32::<LittleEndian>(self.entry_point.load(AtomicOrdering::Relaxed))?;
-        bw.write_u32::<LittleEndian>(self.max_layer.load(AtomicOrdering::Relaxed) as u32)?;
-        bw.write_u32::<LittleEndian>(self.vectors.len() as u32)?;
+        w.write_u32::<LittleEndian>(self.m as u32)?;
+        w.write_u32::<LittleEndian>(self.ef_construction as u32)?;
+        w.write_u32::<LittleEndian>(self.entry_point.load(AtomicOrdering::Relaxed))?;
+        w.write_u32::<LittleEndian>(self.max_layer.load(AtomicOrdering::Relaxed) as u32)?;
+        w.write_u32::<LittleEndian>(self.vectors.len() as u32)?;
 
         // Deleted set.
-        bw.write_u32::<LittleEndian>(self.deleted.len() as u32)?;
+        w.write_u32::<LittleEndian>(self.deleted.len() as u32)?;
         for &id in &self.deleted {
-            bw.write_u32::<LittleEndian>(id)?;
+            w.write_u32::<LittleEndian>(id)?;
         }
 
         // Nodes: vector + graph structure.
         for i in 0..self.vectors.len() {
             // Vector data.
             for &val in &self.vectors[i] {
-                bw.write_f32::<LittleEndian>(val)?;
+                w.write_f32::<LittleEndian>(val)?;
             }
 
             // Graph structure.
             let node = &self.nodes[i];
-            bw.write_u32::<LittleEndian>(node.num_layers() as u32)?;
+            w.write_u32::<LittleEndian>(node.num_layers() as u32)?;
             for l in 0..node.num_layers() {
                 let nb = node.neighbors[l].lock();
-                bw.write_u32::<LittleEndian>(nb.len() as u32)?;
+                w.write_u32::<LittleEndian>(nb.len() as u32)?;
                 for &neighbor_id in nb.iter() {
-                    bw.write_u32::<LittleEndian>(neighbor_id)?;
+                    w.write_u32::<LittleEndian>(neighbor_id)?;
                 }
             }
         }
 
-        bw.flush()?;
+        w.flush()?;
         Ok(())
     }
 
     pub fn load_graph<R: IoRead>(r: &mut R) -> io::Result<Self> {
-        let mut br = io::BufReader::new(r);
+        
 
-        let magic = br.read_u32::<LittleEndian>()?;
+        let magic = r.read_u32::<LittleEndian>()?;
         if magic != Self::GRAPH_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad graph magic"));
         }
-        let version = br.read_u32::<LittleEndian>()?;
+        let version = r.read_u32::<LittleEndian>()?;
         if version != Self::GRAPH_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -549,8 +549,8 @@ impl HnswIndex {
             ));
         }
 
-        let dim = br.read_u32::<LittleEndian>()? as usize;
-        let metric = match br.read_u8()? {
+        let dim = r.read_u32::<LittleEndian>()? as usize;
+        let metric = match r.read_u8()? {
             0 => Metric::Cosine,
             1 => Metric::Euclidean,
             2 => Metric::DotProduct,
@@ -561,17 +561,17 @@ impl HnswIndex {
                 ))
             }
         };
-        let m = br.read_u32::<LittleEndian>()? as usize;
-        let ef_construction = br.read_u32::<LittleEndian>()? as usize;
-        let entry_point = br.read_u32::<LittleEndian>()?;
-        let max_layer = br.read_u32::<LittleEndian>()? as usize;
-        let num_nodes = br.read_u32::<LittleEndian>()? as usize;
+        let m = r.read_u32::<LittleEndian>()? as usize;
+        let ef_construction = r.read_u32::<LittleEndian>()? as usize;
+        let entry_point = r.read_u32::<LittleEndian>()?;
+        let max_layer = r.read_u32::<LittleEndian>()? as usize;
+        let num_nodes = r.read_u32::<LittleEndian>()? as usize;
 
         // Deleted set.
-        let num_deleted = br.read_u32::<LittleEndian>()? as usize;
+        let num_deleted = r.read_u32::<LittleEndian>()? as usize;
         let mut deleted = HashSet::with_capacity(num_deleted);
         for _ in 0..num_deleted {
-            deleted.insert(br.read_u32::<LittleEndian>()?);
+            deleted.insert(r.read_u32::<LittleEndian>()?);
         }
 
         let mut vectors = Vec::with_capacity(num_nodes);
@@ -581,18 +581,18 @@ impl HnswIndex {
             // Vector.
             let mut vec = Vec::with_capacity(dim);
             for _ in 0..dim {
-                vec.push(br.read_f32::<LittleEndian>()?);
+                vec.push(r.read_f32::<LittleEndian>()?);
             }
             vectors.push(vec);
 
             // Graph structure.
-            let num_layers = br.read_u32::<LittleEndian>()? as usize;
+            let num_layers = r.read_u32::<LittleEndian>()? as usize;
             let mut neighbors = Vec::with_capacity(num_layers);
             for _ in 0..num_layers {
-                let num_nb = br.read_u32::<LittleEndian>()? as usize;
+                let num_nb = r.read_u32::<LittleEndian>()? as usize;
                 let mut nb = Vec::with_capacity(num_nb);
                 for _ in 0..num_nb {
-                    nb.push(br.read_u32::<LittleEndian>()?);
+                    nb.push(r.read_u32::<LittleEndian>()?);
                 }
                 neighbors.push(Mutex::new(nb));
             }
