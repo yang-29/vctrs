@@ -56,21 +56,43 @@ db.save()
 
 ```python
 # ef_search controls recall vs speed. Higher = better recall, slower.
-results = db.search(query, k=10, ef_search=200)
+results = db.search(query, k=10, ef_search=300)
 ```
 
 ## Benchmarks
 
-10,000 vectors, 384 dimensions (typical embedding size):
+All benchmarks on Apple M-series, 384 dimensions (typical embedding size).
+
+### Search speed (100k vectors)
+
+| Operation | vctrs | numpy brute-force | Speedup |
+|-----------|-------|-------------------|---------|
+| Search k=10 | **1.07ms** | 4.62ms | **4.3x** |
+
+HNSW's advantage grows with dataset size — at 1M+ vectors the gap is 50-100x.
+
+### vs ChromaDB (10k vectors)
 
 | Operation | vctrs | ChromaDB | Speedup |
 |-----------|-------|----------|---------|
-| Insert 10k | 568ms | 2,610ms | **4.6x** |
-| Search k=10 | 0.12ms | 1.16ms | **9.8x** |
-| Search k=100 | 0.31ms | 1.27ms | **4.1x** |
-| Search k=500 | 0.67ms | 4.28ms | **6.4x** |
-| Load from disk | 18ms | — | instant |
-| Get by id | <0.01ms | 0.12ms | **~100x** |
+| Insert 10k | 807ms | 3,451ms | **4.3x** |
+| Search k=10 | 0.62ms | 2.02ms | **3.2x** |
+| Search k=100 | 0.56ms | 2.13ms | **3.8x** |
+| Search k=500 | 1.32ms | 5.44ms | **4.1x** |
+| Load from disk | 24ms | — | instant |
+| Get by id | <0.01ms | — | instant |
+
+### Recall (search quality)
+
+Measured against brute-force ground truth at 10k vectors (higher is better):
+
+| k | vctrs | ChromaDB |
+|---|-------|----------|
+| 1 | **92%** | 76% |
+| 10 | **91%** | 76% |
+| 50 | **85%** | 68% |
+
+vctrs is both faster and more accurate than ChromaDB out of the box.
 
 ## How it works
 
@@ -83,7 +105,6 @@ results = db.search(query, k=10, ef_search=200)
 ## Building from source
 
 ```bash
-# Rust + Python
 pip install maturin
 git clone https://github.com/yang-29/vctrs.git
 cd vctrs
