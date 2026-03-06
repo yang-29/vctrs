@@ -237,9 +237,10 @@ impl Database {
         let reverse_map = self.reverse_map.read();
         let metadata = self.metadata.read();
 
-        // Adaptive ef: sublinear scaling. At k=10 ef=50, k=100 ef=120, k=1000 ef=200.
+        // Adaptive ef: generous at low k for high recall, sublinear at high k for speed.
+        // k=1: ef=200, k=10: ef=200, k=100: ef=200, k=500: ef=724
         let ef = ef_search.unwrap_or_else(|| {
-            let base = 50usize;
+            let base = 200usize;
             let extra = ((k as f64).sqrt() * 10.0) as usize;
             base.max(k + extra)
         });
