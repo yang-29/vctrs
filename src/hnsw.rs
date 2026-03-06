@@ -76,6 +76,8 @@ pub struct HnswIndex {
     vectors: Vec<Vec<f32>>,
     /// Graph nodes with neighbor lists per layer.
     nodes: Vec<Node>,
+    /// Set of deleted (tombstoned) internal ids.
+    deleted: HashSet<u32>,
     /// Entry point node id (top of the graph).
     entry_point: Option<u32>,
     /// Maximum layer of the entry point.
@@ -92,6 +94,8 @@ pub struct HnswIndex {
     ml: f64,
     /// Vector dimensionality.
     dim: usize,
+    /// Number of active (non-deleted) vectors.
+    active_count: usize,
 }
 
 impl HnswIndex {
@@ -100,6 +104,7 @@ impl HnswIndex {
         HnswIndex {
             vectors: Vec::new(),
             nodes: Vec::new(),
+            deleted: HashSet::new(),
             entry_point: None,
             max_layer: 0,
             metric,
@@ -108,6 +113,7 @@ impl HnswIndex {
             ef_construction,
             ml,
             dim,
+            active_count: 0,
         }
     }
 
@@ -131,6 +137,8 @@ impl HnswIndex {
         };
         self.vectors.push(vector);
         self.nodes.push(node);
+
+        self.active_count += 1;
 
         // First node — just set as entry point.
         if self.entry_point.is_none() {
@@ -205,6 +213,29 @@ impl HnswIndex {
         }
 
         id
+    }
+
+    /// Mark a vector as deleted (tombstone). It will be skipped during search.
+    pub fn mark_deleted(&mut self, id: u32) -> bool {
+        if (id as usize) < self.vectors.len() && !self.deleted.contains(&id) {
+            self.deleted.insert(id);
+            self.active_count -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if an id is deleted.
+    pub fn is_deleted(&self, id: u32) -> bool {
+        self.deleted.contains(&id)
+    }
+
+    /// Update the vector at a given internal id (in-place, no re-linking).
+    /// For small changes this is fine; for large changes, delete + re-insert is better.
+    pub fn update_vector(&mut self, id: u32, vector: Vec<f32>) {
+        assert_eq!(vector.len(), self.dim);
+        self.vectors[id as usize] = vector;
     }
 
     /// Greedy search for single nearest node at a given layer.
@@ -328,6 +359,7 @@ impl HnswIndex {
 
         candidates
             .into_iter()
+            .filter(|c| !self.deleted.contains(&c.id))
             .take(k)
             .map(|c| (c.id, c.dist))
             .collect()
@@ -338,13 +370,18 @@ impl HnswIndex {
         self.vectors.get(id as usize).map(|v| v.as_slice())
     }
 
-    /// Number of vectors in the index.
+    /// Number of active (non-deleted) vectors in the index.
     pub fn len(&self) -> usize {
-        self.vectors.len()
+        self.active_count
     }
 
     pub fn is_empty(&self) -> bool {
-        self.vectors.is_empty()
+        self.active_count == 0
+    }
+
+    /// Total slots used (including deleted).
+    pub fn total_slots(&self) -> usize {
+        self.vectors.len()
     }
 
     pub fn dim(&self) -> usize {

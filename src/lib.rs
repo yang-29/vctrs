@@ -5,9 +5,10 @@ pub mod db;
 
 use db::Database;
 use distance::Metric;
+use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 #[pyclass]
 struct PyDatabase {
@@ -35,24 +36,79 @@ impl PyDatabase {
     }
 
     /// Add a vector with a string id and optional metadata dict.
+    /// Vector can be a list or numpy array.
     #[pyo3(signature = (id, vector, metadata = None))]
-    fn add(&self, id: &str, vector: Vec<f32>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
-        let meta = match metadata {
-            Some(dict) => {
-                let json_str = pythonize_dict(dict)?;
-                Some(json_str)
-            }
-            None => None,
-        };
+    fn add(&self, id: &str, vector: VectorInput<'_>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+        let vec = vector.to_vec()?;
+        let meta = metadata.map(pythonize_dict).transpose()?;
 
-        self.inner.add(id, vector, meta)
+        self.inner.add(id, vec, meta)
             .map_err(|e| PyValueError::new_err(e))
     }
 
-    /// Search for the k nearest neighbors. Returns list of (id, distance, metadata).
+    /// Add multiple vectors at once. Much faster than calling add() in a loop.
+    /// `ids`: list of string ids
+    /// `vectors`: 2D numpy array (n, dim) or list of lists
+    /// `metadatas`: optional list of dicts
+    #[pyo3(signature = (ids, vectors, metadatas = None))]
+    fn add_many(
+        &self,
+        ids: Vec<String>,
+        vectors: BatchVectorInput<'_>,
+        metadatas: Option<&Bound<'_, PyList>>,
+    ) -> PyResult<()> {
+        let vecs = vectors.to_vecs()?;
+
+        if ids.len() != vecs.len() {
+            return Err(PyValueError::new_err(format!(
+                "ids length ({}) != vectors length ({})",
+                ids.len(),
+                vecs.len()
+            )));
+        }
+
+        let metas: Vec<Option<serde_json::Value>> = match metadatas {
+            Some(list) => {
+                if list.len() != ids.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "metadatas length ({}) != ids length ({})",
+                        list.len(),
+                        ids.len()
+                    )));
+                }
+                list.iter()
+                    .map(|item| {
+                        if item.is_none() {
+                            Ok(None)
+                        } else {
+                            let dict = item.downcast::<PyDict>()
+                                .map_err(|_| PyValueError::new_err("metadatas must be list of dicts or None"))?;
+                            pythonize_dict(dict).map(Some)
+                        }
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+            }
+            None => vec![None; ids.len()],
+        };
+
+        let items: Vec<_> = ids
+            .into_iter()
+            .zip(vecs)
+            .zip(metas)
+            .map(|((id, vec), meta)| (id, vec, meta))
+            .collect();
+
+        self.inner.add_many(items)
+            .map_err(|e| PyValueError::new_err(e))
+    }
+
+    /// Search for the k nearest neighbors.
+    /// Returns list of (id, distance, metadata).
+    /// Query can be a list or numpy array.
     #[pyo3(signature = (vector, k = 10))]
-    fn search(&self, vector: Vec<f32>, k: usize) -> PyResult<Vec<(String, f32, Option<PyObject>)>> {
-        let results = self.inner.search(&vector, k)
+    fn search(&self, vector: VectorInput<'_>, k: usize) -> PyResult<Vec<(String, f32, Option<PyObject>)>> {
+        let vec = vector.to_vec()?;
+        let results = self.inner.search(&vec, k)
             .map_err(|e| PyValueError::new_err(e))?;
 
         Python::with_gil(|py| {
@@ -77,6 +133,32 @@ impl PyDatabase {
         })
     }
 
+    /// Delete a vector by id. Returns True if it existed.
+    fn delete(&self, id: &str) -> PyResult<bool> {
+        self.inner.delete(id)
+            .map_err(|e| PyValueError::new_err(e))
+    }
+
+    /// Update a vector's data and/or metadata.
+    #[pyo3(signature = (id, vector = None, metadata = None))]
+    fn update(
+        &self,
+        id: &str,
+        vector: Option<VectorInput<'_>>,
+        metadata: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let vec = vector.map(|v| v.to_vec()).transpose()?;
+        let meta = metadata.map(|d| pythonize_dict(d).map(Some)).transpose()?;
+
+        self.inner.update(id, vec, meta)
+            .map_err(|e| PyValueError::new_err(e))
+    }
+
+    /// Check if an id exists.
+    fn __contains__(&self, id: &str) -> bool {
+        self.inner.contains(id)
+    }
+
     /// Persist the database to disk.
     fn save(&self) -> PyResult<()> {
         self.inner.save().map_err(|e| PyValueError::new_err(e))
@@ -94,9 +176,48 @@ impl PyDatabase {
     }
 }
 
+/// Accept either a Python list or a numpy array as vector input.
+#[derive(FromPyObject)]
+enum VectorInput<'py> {
+    List(Vec<f32>),
+    Numpy(PyReadonlyArray1<'py, f32>),
+}
+
+impl VectorInput<'_> {
+    fn to_vec(self) -> PyResult<Vec<f32>> {
+        match self {
+            VectorInput::List(v) => Ok(v),
+            VectorInput::Numpy(arr) => Ok(arr.as_slice()?.to_vec()),
+        }
+    }
+}
+
+/// Accept either a list of lists or a 2D numpy array for batch input.
+#[derive(FromPyObject)]
+enum BatchVectorInput<'py> {
+    Numpy(PyReadonlyArray2<'py, f32>),
+    Lists(Vec<Vec<f32>>),
+}
+
+impl BatchVectorInput<'_> {
+    fn to_vecs(self) -> PyResult<Vec<Vec<f32>>> {
+        match self {
+            BatchVectorInput::Lists(v) => Ok(v),
+            BatchVectorInput::Numpy(arr) => {
+                let shape = arr.shape();
+                let n = shape[0];
+                let dim = shape[1];
+                let slice = arr.as_slice()?;
+                Ok((0..n)
+                    .map(|i| slice[i * dim..(i + 1) * dim].to_vec())
+                    .collect())
+            }
+        }
+    }
+}
+
 /// Convert a Python dict to a serde_json::Value.
 fn pythonize_dict(dict: &Bound<'_, PyDict>) -> PyResult<serde_json::Value> {
-    // Simple approach: serialize to JSON string via Python, then parse.
     let py = dict.py();
     let json_module = py.import_bound("json")?;
     let json_str: String = json_module
