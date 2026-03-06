@@ -23,16 +23,48 @@ pub struct SearchResult {
     pub metadata: Option<serde_json::Value>,
 }
 
-impl Database {
-    pub fn open(path: &str, dim: usize, metric: Metric) -> Result<Self, String> {
-        let db_path = PathBuf::from(path);
-        std::fs::create_dir_all(&db_path).map_err(|e| e.to_string())?;
+/// Filter predicate for metadata-filtered search.
+#[derive(Debug, Clone)]
+pub enum Filter {
+    /// Field equals value.
+    Eq(String, serde_json::Value),
+    /// Field not equals value.
+    Ne(String, serde_json::Value),
+    /// Field is in list of values.
+    In(String, Vec<serde_json::Value>),
+    /// All sub-filters must match.
+    And(Vec<Filter>),
+    /// Any sub-filter must match.
+    Or(Vec<Filter>),
+}
 
-        let storage = Storage::new(&db_path, dim);
+impl Filter {
+    pub fn matches(&self, metadata: &Option<serde_json::Value>) -> bool {
+        let obj = match metadata {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => return false,
+        };
+
+        match self {
+            Filter::Eq(key, val) => obj.get(key).map_or(false, |v| v == val),
+            Filter::Ne(key, val) => obj.get(key).map_or(true, |v| v != val),
+            Filter::In(key, vals) => obj.get(key).map_or(false, |v| vals.contains(v)),
+            Filter::And(filters) => filters.iter().all(|f| f.matches(metadata)),
+            Filter::Or(filters) => filters.iter().any(|f| f.matches(metadata)),
+        }
+    }
+}
+
+impl Database {
+    /// Open an existing database. Reads dim and metric from the saved file.
+    /// Returns Err if the database doesn't exist — use `open_or_create` instead.
+    pub fn open(path: &str) -> Result<Self, String> {
+        let db_path = PathBuf::from(path);
+        let storage = Storage::new(&db_path, 0);
 
         if storage.exists() {
-            // Fast path: load from single db.vctrs file.
             let (index, meta_records) = storage.load().map_err(|e| e.to_string())?;
+            let dim = index.dim();
 
             let mut id_map = HashMap::with_capacity(meta_records.len());
             let total_slots = index.total_slots();
@@ -55,7 +87,43 @@ impl Database {
             });
         }
 
-        // Try legacy formats (v1 data.vctrs or v2 split files).
+        Err(format!("database not found at '{}'", path))
+    }
+
+    /// Open an existing database or create a new one.
+    /// dim and metric are only used when creating — ignored when opening an existing db.
+    pub fn open_or_create(path: &str, dim: usize, metric: Metric) -> Result<Self, String> {
+        let db_path = PathBuf::from(path);
+        std::fs::create_dir_all(&db_path).map_err(|e| e.to_string())?;
+
+        let storage = Storage::new(&db_path, dim);
+
+        if storage.exists() {
+            let (index, meta_records) = storage.load().map_err(|e| e.to_string())?;
+            let loaded_dim = index.dim();
+
+            let mut id_map = HashMap::with_capacity(meta_records.len());
+            let total_slots = index.total_slots();
+            let mut reverse_map = vec![String::new(); total_slots];
+            let mut metadata = vec![None; total_slots];
+
+            for rec in meta_records {
+                id_map.insert(rec.string_id.clone(), rec.internal_id);
+                reverse_map[rec.internal_id as usize] = rec.string_id;
+                metadata[rec.internal_id as usize] = rec.metadata;
+            }
+
+            return Ok(Database {
+                index: RwLock::new(index),
+                id_map: RwLock::new(id_map),
+                reverse_map: RwLock::new(reverse_map),
+                metadata: RwLock::new(metadata),
+                storage,
+                dim: loaded_dim,
+            });
+        }
+
+        // Try legacy formats.
         let mut index = HnswIndex::new(dim, metric, 16, 200);
         let mut id_map = HashMap::new();
         let mut reverse_map = Vec::new();
@@ -100,7 +168,50 @@ impl Database {
 
         let mut id_map = self.id_map.write();
         if id_map.contains_key(id) {
-            return Err(format!("id '{}' already exists, use update instead", id));
+            return Err(format!("id '{}' already exists, use upsert instead", id));
+        }
+
+        let mut index = self.index.write();
+        let internal_id = index.insert(vector);
+
+        id_map.insert(id.to_string(), internal_id);
+        self.reverse_map.write().push(id.to_string());
+        self.metadata.write().push(metadata);
+
+        Ok(())
+    }
+
+    /// Add or update a vector. If the id exists, updates it. If not, inserts it.
+    pub fn upsert(
+        &self,
+        id: &str,
+        vector: Vec<f32>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        if vector.len() != self.dim {
+            return Err(format!(
+                "dimension mismatch: expected {}, got {}",
+                self.dim,
+                vector.len()
+            ));
+        }
+
+        let id_map = self.id_map.read();
+        if let Some(&internal_id) = id_map.get(id) {
+            drop(id_map);
+            self.index.write().update_vector(internal_id, vector);
+            self.metadata.write()[internal_id as usize] = metadata;
+            return Ok(());
+        }
+        drop(id_map);
+
+        // Not found — insert.
+        let mut id_map = self.id_map.write();
+        // Double-check after acquiring write lock.
+        if let Some(&internal_id) = id_map.get(id) {
+            self.index.write().update_vector(internal_id, vector);
+            self.metadata.write()[internal_id as usize] = metadata;
+            return Ok(());
         }
 
         let mut index = self.index.write();
@@ -155,7 +266,6 @@ impl Database {
 
         for (i, id) in ids_vec.into_iter().enumerate() {
             id_map.insert(id.clone(), internal_ids[i]);
-            // Ensure reverse_map is big enough.
             while reverse_map.len() <= internal_ids[i] as usize {
                 reverse_map.push(String::new());
             }
@@ -214,14 +324,13 @@ impl Database {
         Ok(())
     }
 
-    /// Search for the k nearest neighbors.
-    /// ef_search controls the search quality/speed tradeoff. Higher = better recall, slower.
-    /// If None, uses an adaptive formula based on k.
+    /// Search for the k nearest neighbors, optionally filtered by metadata.
     pub fn search(
         &self,
         query: &[f32],
         k: usize,
         ef_search: Option<usize>,
+        filter: Option<&Filter>,
     ) -> Result<Vec<SearchResult>, String> {
         if query.len() != self.dim {
             return Err(format!(
@@ -235,24 +344,35 @@ impl Database {
         let reverse_map = self.reverse_map.read();
         let metadata = self.metadata.read();
 
-        // Adaptive ef: generous at low k for high recall, sublinear at high k for speed.
-        // k=1: ef=200, k=10: ef=200, k=100: ef=200, k=500: ef=724
         let ef = ef_search.unwrap_or_else(|| {
             let base = 200usize;
             let extra = ((k as f64).sqrt() * 10.0) as usize;
             base.max(k + extra)
         });
-        let raw_results = index.search(query, k, ef);
 
-        let results = raw_results
+        // If filtering, over-fetch then filter down to k.
+        let fetch_k = if filter.is_some() { k * 4 } else { k };
+        let ef = ef.max(fetch_k);
+        let raw_results = index.search(query, fetch_k, ef);
+
+        let mut results: Vec<SearchResult> = raw_results
             .into_iter()
-            .map(|(internal_id, dist)| SearchResult {
-                id: reverse_map[internal_id as usize].clone(),
-                distance: dist,
-                metadata: metadata[internal_id as usize].clone(),
+            .filter_map(|(internal_id, dist)| {
+                let meta = &metadata[internal_id as usize];
+                if let Some(f) = filter {
+                    if !f.matches(meta) {
+                        return None;
+                    }
+                }
+                Some(SearchResult {
+                    id: reverse_map[internal_id as usize].clone(),
+                    distance: dist,
+                    metadata: meta.clone(),
+                })
             })
             .collect();
 
+        results.truncate(k);
         Ok(results)
     }
 
@@ -278,6 +398,11 @@ impl Database {
         self.id_map.read().contains_key(id)
     }
 
+    /// Get all ids in the database.
+    pub fn ids(&self) -> Vec<String> {
+        self.id_map.read().keys().cloned().collect()
+    }
+
     pub fn len(&self) -> usize {
         self.index.read().len()
     }
@@ -286,7 +411,15 @@ impl Database {
         self.len() == 0
     }
 
-    /// Persist to disk — saves the full HNSW graph so load is instant.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    pub fn metric(&self) -> Metric {
+        self.index.read().metric()
+    }
+
+    /// Persist to disk.
     pub fn save(&self) -> Result<(), String> {
         let index = self.index.read();
         let id_map = self.id_map.read();
@@ -305,10 +438,6 @@ impl Database {
             .save(&index, &meta_records)
             .map_err(|e| e.to_string())
     }
-
-    pub fn dim(&self) -> usize {
-        self.dim
-    }
 }
 
 #[cfg(test)]
@@ -319,15 +448,98 @@ mod tests {
     fn test_add_and_search() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("testdb");
-        let db = Database::open(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
+        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
 
         db.add("a", vec![1.0, 0.0, 0.0], Some(serde_json::json!({"label": "x-axis"}))).unwrap();
         db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
         db.add("c", vec![0.0, 0.0, 1.0], None).unwrap();
 
-        let results = db.search(&[0.9, 0.1, 0.0], 2, None).unwrap();
+        let results = db.search(&[0.9, 0.1, 0.0], 2, None, None).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "a");
+    }
+
+    #[test]
+    fn test_auto_detect_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("testdb");
+
+        {
+            let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Euclidean).unwrap();
+            db.add("x", vec![1.0, 2.0, 3.0], None).unwrap();
+            db.save().unwrap();
+        }
+
+        // Reopen with just the path — should auto-detect dim and metric.
+        {
+            let db = Database::open(path.to_str().unwrap()).unwrap();
+            assert_eq!(db.dim(), 3);
+            assert_eq!(db.metric(), Metric::Euclidean);
+            let (vec, _) = db.get("x").unwrap();
+            assert_eq!(vec, vec![1.0, 2.0, 3.0]);
+        }
+    }
+
+    #[test]
+    fn test_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("testdb");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+
+        // Insert via upsert.
+        db.upsert("a", vec![1.0, 0.0], Some(serde_json::json!({"v": 1}))).unwrap();
+        assert_eq!(db.len(), 1);
+        let (vec, meta) = db.get("a").unwrap();
+        assert_eq!(vec, vec![1.0, 0.0]);
+        assert_eq!(meta.unwrap()["v"], 1);
+
+        // Update via upsert.
+        db.upsert("a", vec![0.0, 1.0], Some(serde_json::json!({"v": 2}))).unwrap();
+        assert_eq!(db.len(), 1);
+        let (vec, meta) = db.get("a").unwrap();
+        assert_eq!(vec, vec![0.0, 1.0]);
+        assert_eq!(meta.unwrap()["v"], 2);
+    }
+
+    #[test]
+    fn test_filtered_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("testdb");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+
+        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "sci"}))).unwrap();
+        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"cat": "art"}))).unwrap();
+        db.add("c", vec![0.8, 0.2], Some(serde_json::json!({"cat": "sci"}))).unwrap();
+
+        // Unfiltered: a is closest.
+        let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
+        assert_eq!(results[0].id, "a");
+
+        // Filtered to cat=art: b is the only match.
+        let filter = Filter::Eq("cat".to_string(), serde_json::json!("art"));
+        let results = db.search(&[1.0, 0.0], 1, None, Some(&filter)).unwrap();
+        assert_eq!(results[0].id, "b");
+
+        // Filtered to cat=sci: a is closest.
+        let filter = Filter::Eq("cat".to_string(), serde_json::json!("sci"));
+        let results = db.search(&[1.0, 0.0], 2, None, Some(&filter)).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "a");
+        assert_eq!(results[1].id, "c");
+    }
+
+    #[test]
+    fn test_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("testdb");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        db.add("x", vec![1.0, 0.0], None).unwrap();
+        db.add("y", vec![0.0, 1.0], None).unwrap();
+
+        let mut ids = db.ids();
+        ids.sort();
+        assert_eq!(ids, vec!["x", "y"]);
     }
 
     #[test]
@@ -336,21 +548,20 @@ mod tests {
         let path = dir.path().join("testdb");
 
         {
-            let db = Database::open(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+            let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
             db.add("x", vec![1.0, 2.0], Some(serde_json::json!({"n": 1}))).unwrap();
             db.add("y", vec![3.0, 4.0], None).unwrap();
             db.save().unwrap();
         }
 
         {
-            let db = Database::open(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+            let db = Database::open(path.to_str().unwrap()).unwrap();
             assert_eq!(db.len(), 2);
             let (vec, meta) = db.get("x").unwrap();
             assert_eq!(vec, vec![1.0, 2.0]);
             assert!(meta.is_some());
 
-            // Search should work on loaded graph.
-            let results = db.search(&[1.0, 2.0], 1, None).unwrap();
+            let results = db.search(&[1.0, 2.0], 1, None, None).unwrap();
             assert_eq!(results[0].id, "x");
         }
     }
@@ -359,7 +570,7 @@ mod tests {
     fn test_duplicate_id() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("testdb");
-        let db = Database::open(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
 
         db.add("a", vec![1.0, 0.0], None).unwrap();
         let result = db.add("a", vec![0.0, 1.0], None);
@@ -370,7 +581,7 @@ mod tests {
     fn test_delete() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("testdb");
-        let db = Database::open(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
+        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
 
         db.add("a", vec![1.0, 0.0, 0.0], None).unwrap();
         db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
@@ -381,7 +592,7 @@ mod tests {
         assert_eq!(db.len(), 2);
         assert!(!db.contains("b"));
 
-        let results = db.search(&[0.0, 1.0, 0.0], 3, None).unwrap();
+        let results = db.search(&[0.0, 1.0, 0.0], 3, None, None).unwrap();
         assert!(results.iter().all(|r| r.id != "b"));
     }
 
@@ -389,7 +600,7 @@ mod tests {
     fn test_update() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("testdb");
-        let db = Database::open(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
 
         db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"v": 1}))).unwrap();
 
@@ -407,7 +618,7 @@ mod tests {
     fn test_batch_insert() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("testdb");
-        let db = Database::open(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
 
         let items = vec![
             ("a".to_string(), vec![1.0, 0.0], None),
@@ -417,7 +628,7 @@ mod tests {
         db.add_many(items).unwrap();
         assert_eq!(db.len(), 3);
 
-        let results = db.search(&[1.0, 0.0], 1, None).unwrap();
+        let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
         assert_eq!(results[0].id, "a");
     }
 
@@ -427,7 +638,7 @@ mod tests {
         let path = dir.path().join("testdb");
 
         {
-            let db = Database::open(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+            let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
             db.add("a", vec![1.0, 0.0], None).unwrap();
             db.add("b", vec![0.0, 1.0], None).unwrap();
             db.delete("a").unwrap();
@@ -435,7 +646,7 @@ mod tests {
         }
 
         {
-            let db = Database::open(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+            let db = Database::open(path.to_str().unwrap()).unwrap();
             assert_eq!(db.len(), 1);
             assert!(!db.contains("a"));
             assert!(db.contains("b"));

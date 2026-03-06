@@ -798,7 +798,7 @@ checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "vctrs"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "numpy",
  "pyo3",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "vctrs-core"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "byteorder",
  "parking_lot",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "vctrs-node"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "napi",
  "napi-build",
