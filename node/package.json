@@ -31,13 +31,13 @@
   "author": "Stephen Yang",
   "files": [
     "index.js",
-    "index.d.ts"
+    "index.d.ts",
+    "*.node"
   ],
   "devDependencies": {
     "@napi-rs/cli": "^2"
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "prepublishOnly": "napi prepublish -t npm"
+    "build": "napi build --platform --release"
   }
 }

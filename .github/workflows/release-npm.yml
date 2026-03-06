@@ -58,7 +58,12 @@ jobs:
           pattern: bindings-*
           merge-multiple: true
           path: node
-      - run: npm install
-      - run: npm publish --access public
+      - name: List artifacts
+        working-directory: node
+        run: ls -la *.node || echo "No .node files found"
+      - working-directory: node
+        run: npm install
+      - working-directory: node
+        run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
