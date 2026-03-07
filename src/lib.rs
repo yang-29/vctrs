@@ -1,4 +1,4 @@
-use vctrs_core::db::{Database, Filter};
+use vctrs_core::db::{Database, Filter, HnswConfig};
 use vctrs_core::distance::Metric;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
@@ -48,8 +48,15 @@ impl PyDatabase {
     /// Open or create a database.
     /// When opening an existing database, dim and metric are auto-detected.
     #[new]
-    #[pyo3(signature = (path, dim = None, metric = None))]
-    fn new(path: &str, dim: Option<usize>, metric: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (path, dim = None, metric = None, m = None, ef_construction = None, quantize = false))]
+    fn new(
+        path: &str,
+        dim: Option<usize>,
+        metric: Option<&str>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+        quantize: bool,
+    ) -> PyResult<Self> {
         // Try opening existing database first.
         if dim.is_none() {
             match Database::open(path) {
@@ -63,7 +70,7 @@ impl PyDatabase {
         }
 
         let dim = dim.unwrap();
-        let m = match metric.unwrap_or("cosine") {
+        let metric_enum = match metric.unwrap_or("cosine") {
             "cosine" => Metric::Cosine,
             "euclidean" | "l2" => Metric::Euclidean,
             "dot" | "dot_product" => Metric::DotProduct,
@@ -72,7 +79,13 @@ impl PyDatabase {
             )),
         };
 
-        let db = Database::open_or_create(path, dim, m)
+        let config = HnswConfig {
+            m: m.unwrap_or(16),
+            ef_construction: ef_construction.unwrap_or(200),
+            quantize,
+        };
+
+        let db = Database::open_or_create_with_config(path, dim, metric_enum, config)
             .map_err(|e| PyValueError::new_err(e))?;
 
         Ok(PyDatabase { inner: db })
@@ -164,6 +177,35 @@ impl PyDatabase {
                 id: r.id,
                 distance: r.distance,
                 meta_json: r.metadata.map(|m| serde_json::to_string(&m).unwrap()),
+            })
+            .collect())
+    }
+
+    /// Search multiple queries in parallel. Returns list of list of SearchResult.
+    #[pyo3(signature = (vectors, k = 10, ef_search = None))]
+    fn search_many(
+        &self,
+        vectors: BatchVectorInput<'_>,
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> PyResult<Vec<Vec<PySearchResult>>> {
+        let vecs = vectors.to_vecs()?;
+        let queries: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+
+        let results = self.inner.search_many(&queries, k, ef_search, None)
+            .map_err(|e| PyValueError::new_err(e))?;
+
+        Ok(results
+            .into_iter()
+            .map(|batch| {
+                batch
+                    .into_iter()
+                    .map(|r| PySearchResult {
+                        id: r.id,
+                        distance: r.distance,
+                        meta_json: r.metadata.map(|m| serde_json::to_string(&m).unwrap()),
+                    })
+                    .collect()
             })
             .collect())
     }

@@ -637,6 +637,50 @@ impl HnswIndex {
             .collect()
     }
 
+    /// Search multiple queries in parallel using Rayon.
+    /// Returns one result Vec per query.
+    pub fn search_many(&self, queries: &[&[f32]], k: usize, ef_search: usize) -> Vec<Vec<(u32, f32)>> {
+        if queries.is_empty() {
+            return Vec::new();
+        }
+        for q in queries {
+            assert_eq!(q.len(), self.dim, "query dimension mismatch");
+        }
+
+        let ep = self.entry_point.load(AtomicOrdering::Relaxed);
+        if ep == NO_ENTRY {
+            return vec![Vec::new(); queries.len()];
+        }
+
+        queries
+            .par_iter()
+            .map(|query| {
+                if self.uses_brute_force() {
+                    return self.brute_force_search(query, k);
+                }
+
+                let ef = ef_search.max(k);
+                let max_layer = self.max_layer.load(AtomicOrdering::Relaxed);
+
+                let mut current_ep = ep;
+                if max_layer > 0 {
+                    for l in (1..=max_layer).rev() {
+                        current_ep = self.search_layer_single(query, current_ep, l);
+                    }
+                }
+
+                let candidates = self.search_layer(query, current_ep, ef, 0);
+
+                candidates
+                    .into_iter()
+                    .filter(|c| !self.deleted.contains(&c.id))
+                    .take(k)
+                    .map(|c| (c.id, c.dist))
+                    .collect()
+            })
+            .collect()
+    }
+
     // -- Accessors ------------------------------------------------------------
 
     pub fn get_vector(&self, id: u32) -> Option<&[f32]> {
@@ -661,6 +705,11 @@ impl HnswIndex {
 
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// Raw access to the flat vector storage (for quantization, etc.).
+    pub fn vectors_slice(&self) -> &[f32] {
+        self.vectors.as_slice()
     }
 
     pub fn metric(&self) -> Metric {
@@ -994,6 +1043,23 @@ mod tests {
             found_ids.contains(&true_nearest),
             "HNSW missed the true nearest neighbor"
         );
+    }
+
+    #[test]
+    fn test_search_many() {
+        let mut index = HnswIndex::new(3, Metric::Euclidean, 16, 200);
+        index.insert(vec![1.0, 0.0, 0.0]);
+        index.insert(vec![0.0, 1.0, 0.0]);
+        index.insert(vec![0.0, 0.0, 1.0]);
+
+        let q1 = [1.0f32, 0.0, 0.0];
+        let q2 = [0.0f32, 1.0, 0.0];
+        let queries: Vec<&[f32]> = vec![&q1, &q2];
+
+        let results = index.search_many(&queries, 1, 50);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0][0].0, 0); // q1 closest to vec 0
+        assert_eq!(results[1][0].0, 1); // q2 closest to vec 1
     }
 
     #[test]

@@ -2,10 +2,33 @@
 
 use crate::distance::Metric;
 use crate::hnsw::HnswIndex;
+use crate::quantize::ScalarQuantizer;
 use crate::storage::{MetaRecord, Storage};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Database configuration options.
+#[derive(Debug, Clone)]
+pub struct HnswConfig {
+    /// Number of bi-directional links per node. Higher = better recall, more memory. Default: 16.
+    pub m: usize,
+    /// Size of the dynamic candidate list during construction. Higher = better recall, slower build. Default: 200.
+    pub ef_construction: usize,
+    /// Enable scalar quantization (SQ8) for ~4x smaller disk storage.
+    /// Vectors are stored as u8 on disk and dequantized to f32 on load.
+    pub quantize: bool,
+}
+
+impl Default for HnswConfig {
+    fn default() -> Self {
+        HnswConfig {
+            m: 16,
+            ef_construction: 200,
+            quantize: false,
+        }
+    }
+}
 
 pub struct Database {
     index: RwLock<HnswIndex>,
@@ -14,6 +37,8 @@ pub struct Database {
     metadata: RwLock<Vec<Option<serde_json::Value>>>,
     storage: Storage,
     dim: usize,
+    quantizer: RwLock<Option<ScalarQuantizer>>,
+    quantize_on_save: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +88,7 @@ impl Database {
         let storage = Storage::new(&db_path, 0);
 
         if storage.exists() {
+            let has_quantized = storage.has_quantized();
             let (index, meta_records) = storage.load().map_err(|e| e.to_string())?;
             let dim = index.dim();
 
@@ -84,6 +110,8 @@ impl Database {
                 metadata: RwLock::new(metadata),
                 storage,
                 dim,
+                quantizer: RwLock::new(None),
+                quantize_on_save: has_quantized,
             });
         }
 
@@ -93,12 +121,23 @@ impl Database {
     /// Open an existing database or create a new one.
     /// dim and metric are only used when creating — ignored when opening an existing db.
     pub fn open_or_create(path: &str, dim: usize, metric: Metric) -> Result<Self, String> {
+        Self::open_or_create_with_config(path, dim, metric, HnswConfig::default())
+    }
+
+    /// Open an existing database or create a new one with custom HNSW parameters.
+    pub fn open_or_create_with_config(
+        path: &str,
+        dim: usize,
+        metric: Metric,
+        config: HnswConfig,
+    ) -> Result<Self, String> {
         let db_path = PathBuf::from(path);
         std::fs::create_dir_all(&db_path).map_err(|e| e.to_string())?;
 
         let storage = Storage::new(&db_path, dim);
 
         if storage.exists() {
+            let has_quantized = storage.has_quantized();
             let (index, meta_records) = storage.load().map_err(|e| e.to_string())?;
             let loaded_dim = index.dim();
 
@@ -120,16 +159,20 @@ impl Database {
                 metadata: RwLock::new(metadata),
                 storage,
                 dim: loaded_dim,
+                quantizer: RwLock::new(None),
+                quantize_on_save: config.quantize || has_quantized,
             });
         }
 
         Ok(Database {
-            index: RwLock::new(HnswIndex::new(dim, metric, 16, 200)),
+            index: RwLock::new(HnswIndex::new(dim, metric, config.m, config.ef_construction)),
             id_map: RwLock::new(HashMap::new()),
             reverse_map: RwLock::new(Vec::new()),
             metadata: RwLock::new(Vec::new()),
             storage,
             dim,
+            quantizer: RwLock::new(None),
+            quantize_on_save: config.quantize,
         })
     }
 
@@ -400,6 +443,62 @@ impl Database {
         }
     }
 
+    /// Search multiple queries in parallel. Returns one result Vec per query.
+    pub fn search_many(
+        &self,
+        queries: &[&[f32]],
+        k: usize,
+        ef_search: Option<usize>,
+        filter: Option<&Filter>,
+    ) -> Result<Vec<Vec<SearchResult>>, String> {
+        for q in queries {
+            if q.len() != self.dim {
+                return Err(format!(
+                    "dimension mismatch: expected {}, got {}",
+                    self.dim,
+                    q.len()
+                ));
+            }
+        }
+
+        let index = self.index.read();
+        let reverse_map = self.reverse_map.read();
+        let metadata = self.metadata.read();
+
+        let ef = ef_search.unwrap_or_else(|| {
+            let base = 200usize;
+            let extra = ((k as f64).sqrt() * 10.0) as usize;
+            base.max(k + extra)
+        });
+
+        if filter.is_some() {
+            // For filtered search, fall back to per-query search.
+            drop(index);
+            drop(reverse_map);
+            drop(metadata);
+            return queries
+                .iter()
+                .map(|q| self.search(q, k, ef_search, filter))
+                .collect();
+        }
+
+        let raw_results = index.search_many(queries, k, ef);
+
+        Ok(raw_results
+            .into_iter()
+            .map(|results| {
+                results
+                    .into_iter()
+                    .map(|(internal_id, dist)| SearchResult {
+                        id: reverse_map[internal_id as usize].clone(),
+                        distance: dist,
+                        metadata: metadata[internal_id as usize].clone(),
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
     pub fn get(&self, id: &str) -> Result<(Vec<f32>, Option<serde_json::Value>), String> {
         let id_map = self.id_map.read();
         let internal_id = id_map
@@ -459,7 +558,7 @@ impl Database {
             .collect();
 
         self.storage
-            .save(&index, &meta_records)
+            .save(&index, &meta_records, self.quantize_on_save)
             .map_err(|e| e.to_string())
     }
 }

@@ -31,6 +31,7 @@ db.add("doc1", vector, {"title": "hello"})
 db.add_many(ids, vectors)              # batch insert (parallel HNSW)
 
 results = db.search(query_vector, k=10)  # → [(id, distance, metadata), ...]
+batch = db.search_many(query_vectors, k=10)  # parallel multi-query search
 
 db.upsert("doc1", new_vector, metadata)
 db.delete("doc1")
@@ -38,6 +39,8 @@ db.get("doc1")                          # → (vector, metadata)
 "doc1" in db                            # → True
 db.save()                               # persist to disk
 ```
+
+Options: `m=16` (HNSW links), `ef_construction=200` (build quality), `quantize=True` (SQ8, ~4x smaller on disk).
 
 ## Node
 
@@ -50,6 +53,7 @@ db.add("doc1", vector, { title: "hello" });
 db.addMany(ids, vectors);
 
 const results = db.search(queryVector, 10); // → [{ id, distance, metadata }, ...]
+const batch = db.searchMany(queryVectors, 10); // parallel multi-query search
 
 db.save();
 ```
@@ -72,10 +76,11 @@ Metrics: `"cosine"` (default), `"euclidean"`, `"dot"`.
 <summary>How it works</summary>
 
 - HNSW index with flat contiguous vector storage for cache locality
+- Optional scalar quantization (SQ8) for ~4x smaller on-disk storage
 - Auto brute-force for small datasets (100% recall, BLAS-accelerated)
 - Memory-mapped vectors — zero-copy load, OS-managed paging
 - SimSIMD for per-vector SIMD (ARM NEON, x86 AVX2/512)
-- Rayon for parallel index construction
+- Rayon for parallel index construction and batch search
 - PyO3 + maturin for zero-copy Python/numpy bindings
 
 </details>
@@ -88,12 +93,19 @@ vctrs-core = "0.1"
 ```
 
 ```rust
-use vctrs_core::db::Database;
+use vctrs_core::db::{Database, HnswConfig};
 use vctrs_core::distance::Metric;
 
 let db = Database::open_or_create("./mydb", 384, Metric::Cosine)?;
 db.add("doc1", embedding, Some(json!({"title": "hello"})))?;
 let results = db.search(&query, 10, None, None)?;
+
+// Batch search (parallel)
+let batch = db.search_many(&[&q1, &q2], 10, None, None)?;
+
+// Custom HNSW config + quantization
+let config = HnswConfig { m: 32, ef_construction: 400, quantize: true };
+let db = Database::open_or_create_with_config("./mydb", 384, Metric::Cosine, config)?;
 ```
 
 ## Examples

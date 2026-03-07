@@ -7,9 +7,69 @@ on:
     branches: [main]
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --lib
+      - name: Install BLAS (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - run: cargo test -p vctrs-core
+
+  python:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install BLAS (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - name: Build and test Python bindings
+        run: |
+          python -m pip install numpy maturin pytest
+          maturin develop --release
+          python -c "
+          from vctrs import Database
+          import tempfile, os, numpy as np
+
+          with tempfile.TemporaryDirectory() as tmp:
+              db = Database(os.path.join(tmp, 'test'), dim=4, metric='cosine')
+              db.add('a', [1.0, 0.0, 0.0, 0.0])
+              db.add('b', [0.0, 1.0, 0.0, 0.0])
+              results = db.search([1.0, 0.0, 0.0, 0.0], k=1)
+              assert results[0].id == 'a', f'expected a, got {results[0].id}'
+
+              # Test batch insert with numpy
+              vecs = np.random.rand(100, 4).astype(np.float32)
+              ids = [f'v{i}' for i in range(100)]
+              db.add_many(ids, vecs)
+              assert len(db) == 102
+
+              # Test search_many
+              queries = np.random.rand(5, 4).astype(np.float32)
+              batch_results = db.search_many(queries, k=3)
+              assert len(batch_results) == 5
+              assert len(batch_results[0]) == 3
+
+              # Test save/load
+              db.save()
+              db2 = Database(os.path.join(tmp, 'test'))
+              assert len(db2) == 102
+
+              # Test quantize option
+              db3 = Database(os.path.join(tmp, 'qtest'), dim=4, metric='cosine', quantize=True)
+              db3.add('x', [1.0, 0.0, 0.0, 0.0])
+              db3.save()
+
+          print('All Python tests passed')
+          "

@@ -1,6 +1,6 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use vctrs_core::db::{Database, Filter};
+use vctrs_core::db::{Database, Filter, HnswConfig};
 use vctrs_core::distance::Metric;
 
 #[napi(object)]
@@ -25,8 +25,16 @@ pub struct VctrsDatabase {
 impl VctrsDatabase {
     /// Open or create a database.
     /// If the database exists, dim and metric are auto-detected (pass null).
+    /// Optional: `hnswM` (default 16), `efConstruction` (default 200), `quantize` (default false).
     #[napi(constructor)]
-    pub fn new(path: String, dim: Option<u32>, metric: Option<String>) -> Result<Self> {
+    pub fn new(
+        path: String,
+        dim: Option<u32>,
+        metric: Option<String>,
+        hnsw_m: Option<u32>,
+        ef_construction: Option<u32>,
+        quantize: Option<bool>,
+    ) -> Result<Self> {
         if dim.is_none() {
             let db = Database::open(&path)
                 .map_err(|e| Error::from_reason(e))?;
@@ -43,7 +51,13 @@ impl VctrsDatabase {
             ))),
         };
 
-        let db = Database::open_or_create(&path, dim as usize, m)
+        let config = HnswConfig {
+            m: hnsw_m.unwrap_or(16) as usize,
+            ef_construction: ef_construction.unwrap_or(200) as usize,
+            quantize: quantize.unwrap_or(false),
+        };
+
+        let db = Database::open_or_create_with_config(&path, dim as usize, m, config)
             .map_err(|e| Error::from_reason(e))?;
 
         Ok(VctrsDatabase { inner: db })
@@ -112,6 +126,40 @@ impl VctrsDatabase {
             distance: r.distance as f64,
             metadata: r.metadata,
         }).collect())
+    }
+
+    /// Search multiple queries in parallel. Returns array of result arrays.
+    #[napi]
+    pub fn search_many(
+        &self,
+        vectors: Vec<Vec<f64>>,
+        k: Option<u32>,
+        ef_search: Option<u32>,
+    ) -> Result<Vec<Vec<SearchResult>>> {
+        let vecs_f32: Vec<Vec<f32>> = vectors
+            .iter()
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .collect();
+        let queries: Vec<&[f32]> = vecs_f32.iter().map(|v| v.as_slice()).collect();
+        let k = k.unwrap_or(10) as usize;
+        let ef = ef_search.map(|e| e as usize);
+
+        let results = self.inner.search_many(&queries, k, ef, None)
+            .map_err(|e| Error::from_reason(e))?;
+
+        Ok(results
+            .into_iter()
+            .map(|batch| {
+                batch
+                    .into_iter()
+                    .map(|r| SearchResult {
+                        id: r.id,
+                        distance: r.distance as f64,
+                        metadata: r.metadata,
+                    })
+                    .collect()
+            })
+            .collect())
     }
 
     #[napi]

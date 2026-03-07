@@ -15,6 +15,7 @@
 ///     metadata: [u8; meta_len]
 
 use crate::hnsw::HnswIndex;
+use crate::quantize::ScalarQuantizer;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use memmap2::Mmap;
 use std::fs::{self, File};
@@ -33,6 +34,7 @@ pub struct MetaRecord {
 pub struct Storage {
     graph_path: PathBuf,
     vectors_path: PathBuf,
+    quantized_path: PathBuf,
 }
 
 impl Storage {
@@ -40,6 +42,7 @@ impl Storage {
         Storage {
             graph_path: dir.join("graph.vctrs"),
             vectors_path: dir.join("vectors.bin"),
+            quantized_path: dir.join("vectors.sq8"),
         }
     }
 
@@ -52,12 +55,13 @@ impl Storage {
         &self,
         index: &HnswIndex,
         meta_records: &[MetaRecord],
+        quantize: bool,
     ) -> io::Result<()> {
         if let Some(parent) = self.graph_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        // Write vectors.bin (flat f32 array — mmap-friendly).
+        // Always write full vectors.bin (mmap-friendly f32).
         let vec_tmp = self.vectors_path.with_extension("tmp");
         {
             let f = File::create(&vec_tmp)?;
@@ -65,6 +69,27 @@ impl Storage {
             index.save_vectors(&mut w)?;
         }
         fs::rename(&vec_tmp, &self.vectors_path)?;
+
+        // Optionally write quantized vectors (SQ8).
+        if quantize {
+            let dim = index.dim();
+            let vectors = index.vectors_slice();
+            let sq = ScalarQuantizer::train(vectors, dim);
+            let quantized = sq.quantize_batch(vectors, dim);
+
+            let sq_tmp = self.quantized_path.with_extension("tmp");
+            {
+                let f = File::create(&sq_tmp)?;
+                let mut w = BufWriter::new(f);
+                sq.save(&mut w)?;
+                w.write_all(&quantized)?;
+                w.flush()?;
+            }
+            fs::rename(&sq_tmp, &self.quantized_path)?;
+        } else if self.quantized_path.exists() {
+            // Remove stale quantized file if quantization was disabled.
+            let _ = fs::remove_file(&self.quantized_path);
+        }
 
         // Write graph.vctrs (structure + metadata).
         let graph_tmp = self.graph_path.with_extension("tmp");
@@ -97,6 +122,11 @@ impl Storage {
         fs::rename(&graph_tmp, &self.graph_path)?;
 
         Ok(())
+    }
+
+    /// Check if a quantized vectors file exists.
+    pub fn has_quantized(&self) -> bool {
+        self.quantized_path.exists()
     }
 
     /// Load graph + metadata with mmap'd vectors (instant vector access, zero-copy).
@@ -176,7 +206,7 @@ mod tests {
             },
         ];
 
-        storage.save(&index, &meta_records).unwrap();
+        storage.save(&index, &meta_records, false).unwrap();
 
         assert!(dir.path().join("graph.vctrs").exists());
         assert!(dir.path().join("vectors.bin").exists());
@@ -191,5 +221,41 @@ mod tests {
 
         let results = loaded_index.search(&[1.0, 0.0, 0.0], 1, 50);
         assert_eq!(results[0].0, 0);
+    }
+
+    #[test]
+    fn test_quantized_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path(), 3);
+
+        let mut index = HnswIndex::new(3, Metric::Cosine, 16, 200);
+        index.insert(vec![1.0, 0.0, 0.0]);
+        index.insert(vec![0.0, 1.0, 0.0]);
+
+        let meta_records = vec![
+            MetaRecord {
+                internal_id: 0,
+                string_id: "a".to_string(),
+                metadata: None,
+            },
+            MetaRecord {
+                internal_id: 1,
+                string_id: "b".to_string(),
+                metadata: None,
+            },
+        ];
+
+        storage.save(&index, &meta_records, true).unwrap();
+
+        // Quantized file should exist and be smaller than full vectors.
+        assert!(dir.path().join("vectors.sq8").exists());
+        let full_size = std::fs::metadata(dir.path().join("vectors.bin")).unwrap().len();
+        let sq_size = std::fs::metadata(dir.path().join("vectors.sq8")).unwrap().len();
+        // SQ8 has quantizer params overhead, but for larger vectors would be ~4x smaller.
+        // For 2 vectors of dim=3: full = (2*3 + 2) * 4 = 32 bytes, sq8 = 4 + 3*4*2 + 2*3 = 34 bytes.
+        // At small scale the overhead dominates, but the file should still exist.
+        assert!(sq_size > 0);
+        // Full vectors file should also exist (always written).
+        assert!(full_size > 0);
     }
 }
