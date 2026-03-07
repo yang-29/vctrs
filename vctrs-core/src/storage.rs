@@ -1,8 +1,10 @@
-/// On-disk storage for the entire database in a single file: db.vctrs
+/// On-disk storage for the database.
 ///
-/// Format: [HNSW graph (vectors + structure)] [metadata section]
+/// Two files:
+///   vectors.bin — flat f32 array, memory-mapped on load (instant, zero-copy)
+///   graph.vctrs — HNSW graph structure + metadata
 ///
-/// The metadata section is appended after the graph data:
+/// Metadata section (appended to graph.vctrs):
 ///   meta_magic: u32 = 0x4D455441 ("META")
 ///   num_records: u32
 ///   for each record:
@@ -14,21 +16,12 @@
 
 use crate::hnsw::HnswIndex;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use memmap2::Mmap;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read as IoRead, Write as IoWrite};
+use std::io::{self, BufWriter, Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
 const META_SECTION_MAGIC: u32 = 0x4D455441;
-
-/// Legacy v1 format magic.
-const LEGACY_MAGIC: u32 = 0x56435452;
-
-#[derive(Clone, Debug)]
-pub struct Record {
-    pub string_id: String,
-    pub vector: Vec<f32>,
-    pub metadata: Option<serde_json::Value>,
-}
 
 #[derive(Clone, Debug)]
 pub struct MetaRecord {
@@ -38,36 +31,47 @@ pub struct MetaRecord {
 }
 
 pub struct Storage {
-    path: PathBuf,
+    graph_path: PathBuf,
+    vectors_path: PathBuf,
 }
 
 impl Storage {
     pub fn new(dir: &Path, _dim: usize) -> Self {
         Storage {
-            path: dir.join("db.vctrs"),
+            graph_path: dir.join("graph.vctrs"),
+            vectors_path: dir.join("vectors.bin"),
         }
     }
 
     pub fn exists(&self) -> bool {
-        self.path.exists()
+        self.graph_path.exists() && self.vectors_path.exists()
     }
 
-    /// Save everything to a single file: graph + metadata.
+    /// Save graph + vectors + metadata to disk.
     pub fn save(
         &self,
         index: &HnswIndex,
         meta_records: &[MetaRecord],
     ) -> io::Result<()> {
-        if let Some(parent) = self.path.parent() {
+        if let Some(parent) = self.graph_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        let tmp_path = self.path.with_extension("tmp");
+        // Write vectors.bin (flat f32 array — mmap-friendly).
+        let vec_tmp = self.vectors_path.with_extension("tmp");
         {
-            let f = File::create(&tmp_path)?;
+            let f = File::create(&vec_tmp)?;
+            let mut w = BufWriter::new(f);
+            index.save_vectors(&mut w)?;
+        }
+        fs::rename(&vec_tmp, &self.vectors_path)?;
+
+        // Write graph.vctrs (structure + metadata).
+        let graph_tmp = self.graph_path.with_extension("tmp");
+        {
+            let f = File::create(&graph_tmp)?;
             let mut w = BufWriter::new(f);
 
-            // Write HNSW graph (vectors + structure).
             index.save_graph(&mut w)?;
 
             // Append metadata section.
@@ -90,42 +94,45 @@ impl Storage {
 
             w.flush()?;
         }
+        fs::rename(&graph_tmp, &self.graph_path)?;
 
-        fs::rename(&tmp_path, &self.path)?;
         Ok(())
     }
 
-    /// Load everything from the single file.
+    /// Load graph + metadata with mmap'd vectors (instant vector access, zero-copy).
     pub fn load(&self) -> io::Result<(HnswIndex, Vec<MetaRecord>)> {
-        let f = File::open(&self.path)?;
-        let mut r = BufReader::new(f);
+        // Memory-map vectors.
+        let vec_file = File::open(&self.vectors_path)?;
+        let vectors_mmap = unsafe { Mmap::map(&vec_file)? };
 
-        // Read HNSW graph.
-        let index = HnswIndex::load_graph(&mut r)?;
+        // Read entire graph file at once for fast parsing.
+        let graph_data = fs::read(&self.graph_path)?;
+        let (index, remaining) = HnswIndex::load_graph_mmap(&graph_data, vectors_mmap)?;
 
-        // Read metadata section.
-        let meta_magic = r.read_u32::<LittleEndian>()?;
+        // Parse metadata section from remaining bytes.
+        let mut cursor = remaining;
+        let meta_magic = cursor.read_u32::<LittleEndian>()?;
         if meta_magic != META_SECTION_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bad metadata section magic",
             ));
         }
-        let count = r.read_u32::<LittleEndian>()? as usize;
+        let count = cursor.read_u32::<LittleEndian>()? as usize;
 
         let mut records = Vec::with_capacity(count);
         for _ in 0..count {
-            let internal_id = r.read_u32::<LittleEndian>()?;
-            let id_len = r.read_u32::<LittleEndian>()? as usize;
+            let internal_id = cursor.read_u32::<LittleEndian>()?;
+            let id_len = cursor.read_u32::<LittleEndian>()? as usize;
             let mut id_bytes = vec![0u8; id_len];
-            r.read_exact(&mut id_bytes)?;
+            cursor.read_exact(&mut id_bytes)?;
             let string_id = String::from_utf8(id_bytes)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-            let meta_len = r.read_u32::<LittleEndian>()? as usize;
+            let meta_len = cursor.read_u32::<LittleEndian>()? as usize;
             let metadata = if meta_len > 0 {
                 let mut meta_bytes = vec![0u8; meta_len];
-                r.read_exact(&mut meta_bytes)?;
+                cursor.read_exact(&mut meta_bytes)?;
                 serde_json::from_slice(&meta_bytes).ok()
             } else {
                 None
@@ -139,64 +146,6 @@ impl Storage {
         }
 
         Ok((index, records))
-    }
-
-    /// Check for and migrate legacy formats (v1 data.vctrs or v2 split files).
-    pub fn legacy_path(&self) -> Option<PathBuf> {
-        // v2 split format
-        let graph = self.path.parent()?.join("graph.vctrs");
-        if graph.exists() {
-            return Some(graph);
-        }
-        // v1 format
-        let data = self.path.parent()?.join("data.vctrs");
-        if data.exists() {
-            return Some(data);
-        }
-        None
-    }
-
-    pub fn load_legacy_v1(&self, path: &Path) -> io::Result<Vec<Record>> {
-        let f = File::open(path)?;
-        let mut r = BufReader::new(f);
-
-        let magic = r.read_u32::<LittleEndian>()?;
-        if magic != LEGACY_MAGIC {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
-        }
-        let version = r.read_u32::<LittleEndian>()?;
-        if version != 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a v1 file"));
-        }
-        let dim = r.read_u32::<LittleEndian>()? as usize;
-        let count = r.read_u32::<LittleEndian>()? as usize;
-
-        let mut records = Vec::with_capacity(count);
-        for _ in 0..count {
-            let id_len = r.read_u32::<LittleEndian>()? as usize;
-            let mut id_bytes = vec![0u8; id_len];
-            r.read_exact(&mut id_bytes)?;
-            let string_id = String::from_utf8(id_bytes)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-            let mut vector = Vec::with_capacity(dim);
-            for _ in 0..dim {
-                vector.push(r.read_f32::<LittleEndian>()?);
-            }
-
-            let meta_len = r.read_u32::<LittleEndian>()? as usize;
-            let metadata = if meta_len > 0 {
-                let mut meta_bytes = vec![0u8; meta_len];
-                r.read_exact(&mut meta_bytes)?;
-                serde_json::from_slice(&meta_bytes).ok()
-            } else {
-                None
-            };
-
-            records.push(Record { string_id, vector, metadata });
-        }
-
-        Ok(records)
     }
 }
 
@@ -229,15 +178,14 @@ mod tests {
 
         storage.save(&index, &meta_records).unwrap();
 
-        // Should be a single file.
-        assert!(dir.path().join("db.vctrs").exists());
-        assert!(!dir.path().join("graph.vctrs").exists());
-        assert!(!dir.path().join("meta.vctrs").exists());
+        assert!(dir.path().join("graph.vctrs").exists());
+        assert!(dir.path().join("vectors.bin").exists());
 
-        // Load back.
+        // Load back — vectors are mmap'd.
         let (loaded_index, loaded_meta) = storage.load().unwrap();
 
         assert_eq!(loaded_index.len(), 2);
+        assert!(loaded_index.is_mmap());
         assert_eq!(loaded_meta.len(), 2);
         assert_eq!(loaded_meta[0].string_id, "a");
 

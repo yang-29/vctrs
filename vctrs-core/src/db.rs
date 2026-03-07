@@ -123,30 +123,11 @@ impl Database {
             });
         }
 
-        // Try legacy formats.
-        let mut index = HnswIndex::new(dim, metric, 16, 200);
-        let mut id_map = HashMap::new();
-        let mut reverse_map = Vec::new();
-        let mut meta = Vec::new();
-
-        if let Some(legacy_path) = storage.legacy_path() {
-            let legacy_records = storage.load_legacy_v1(&legacy_path).unwrap_or_default();
-            if !legacy_records.is_empty() {
-                let vecs: Vec<Vec<f32>> = legacy_records.iter().map(|r| r.vector.clone()).collect();
-                let ids = index.batch_insert(vecs);
-                for (i, record) in legacy_records.iter().enumerate() {
-                    id_map.insert(record.string_id.clone(), ids[i]);
-                    reverse_map.push(record.string_id.clone());
-                    meta.push(record.metadata.clone());
-                }
-            }
-        }
-
         Ok(Database {
-            index: RwLock::new(index),
-            id_map: RwLock::new(id_map),
-            reverse_map: RwLock::new(reverse_map),
-            metadata: RwLock::new(meta),
+            index: RwLock::new(HnswIndex::new(dim, metric, 16, 200)),
+            id_map: RwLock::new(HashMap::new()),
+            reverse_map: RwLock::new(Vec::new()),
+            metadata: RwLock::new(Vec::new()),
             storage,
             dim,
         })
@@ -350,30 +331,73 @@ impl Database {
             base.max(k + extra)
         });
 
-        // If filtering, over-fetch then filter down to k.
-        let fetch_k = if filter.is_some() { k * 4 } else { k };
-        let ef = ef.max(fetch_k);
-        let raw_results = index.search(query, fetch_k, ef);
+        if let Some(f) = filter {
+            let total = index.len();
 
-        let mut results: Vec<SearchResult> = raw_results
-            .into_iter()
-            .filter_map(|(internal_id, dist)| {
-                let meta = &metadata[internal_id as usize];
-                if let Some(f) = filter {
-                    if !f.matches(meta) {
-                        return None;
-                    }
+            if index.uses_brute_force() {
+                // Brute-force: scan everything once, filter inline.
+                let raw_results = index.search(query, total, ef);
+                let mut results: Vec<SearchResult> = raw_results
+                    .into_iter()
+                    .filter_map(|(internal_id, dist)| {
+                        let meta = &metadata[internal_id as usize];
+                        if !f.matches(meta) {
+                            return None;
+                        }
+                        Some(SearchResult {
+                            id: reverse_map[internal_id as usize].clone(),
+                            distance: dist,
+                            metadata: meta.clone(),
+                        })
+                    })
+                    .collect();
+                results.truncate(k);
+                return Ok(results);
+            }
+
+            // HNSW: adaptive over-fetch, escalate if too few results match.
+            let mut multiplier = 4usize;
+            loop {
+                let fetch_k = k * multiplier;
+                let search_ef = ef.max(fetch_k);
+                let raw_results = index.search(query, fetch_k, search_ef);
+
+                let mut results: Vec<SearchResult> = raw_results
+                    .into_iter()
+                    .filter_map(|(internal_id, dist)| {
+                        let meta = &metadata[internal_id as usize];
+                        if !f.matches(meta) {
+                            return None;
+                        }
+                        Some(SearchResult {
+                            id: reverse_map[internal_id as usize].clone(),
+                            distance: dist,
+                            metadata: meta.clone(),
+                        })
+                    })
+                    .collect();
+
+                results.truncate(k);
+
+                if results.len() >= k || multiplier >= 64 || fetch_k >= total {
+                    return Ok(results);
                 }
-                Some(SearchResult {
+                multiplier *= 4;
+            }
+        } else {
+            let raw_results = index.search(query, k, ef);
+
+            let results: Vec<SearchResult> = raw_results
+                .into_iter()
+                .map(|(internal_id, dist)| SearchResult {
                     id: reverse_map[internal_id as usize].clone(),
                     distance: dist,
-                    metadata: meta.clone(),
+                    metadata: metadata[internal_id as usize].clone(),
                 })
-            })
-            .collect();
+                .collect();
 
-        results.truncate(k);
-        Ok(results)
+            Ok(results)
+        }
     }
 
     pub fn get(&self, id: &str) -> Result<(Vec<f32>, Option<serde_json::Value>), String> {

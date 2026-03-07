@@ -1,106 +1,113 @@
 # vctrs
 
-A fast embedded vector database. Rust core, Python API.
+A fast embedded vector database. Rust core with Python and Node bindings.
 
-Built for apps that need vector search without running a separate server — RAG pipelines, desktop apps, CLI tools, notebooks.
+Vector search as a library, not a service. No server, no config. `pip install vctrs` and go.
+
+## Why vctrs
+
+ChromaDB, Pinecone, and Qdrant are databases you run. vctrs is a library you embed. Use it when:
+
+- You're building a **tool or library** that needs vector search without inflicting a 200MB dependency tree on users
+- You need **high-throughput batch search** — deduplication, clustering, similarity joins in tight loops
+- You want **sub-millisecond search** without the overhead of client-server round trips
+- You're building in **Rust** and need a native vector search crate
 
 ## Install
 
 ```bash
-pip install vctrs
+pip install vctrs        # Python
+npm install @yang-29/vctrs  # Node
 ```
 
-## Usage
+## Python
 
 ```python
-import numpy as np
 from vctrs import Database
 
-# Create or open a database
 db = Database("./mydb", dim=384, metric="cosine")
 
-# Add vectors (accepts lists or numpy arrays)
-db.add("doc1", np.random.rand(384).astype(np.float32), {"title": "hello"})
+db.add("doc1", vector, {"title": "hello"})
+db.add_many(ids, vectors)              # batch insert (parallel HNSW)
 
-# Batch insert (much faster)
-ids = [f"doc{i}" for i in range(10000)]
-vectors = np.random.rand(10000, 384).astype(np.float32)
-db.add_many(ids, vectors)
+results = db.search(query_vector, k=10)  # → [(id, distance, metadata), ...]
 
-# Search
-results = db.search(query_vector, k=10)
-for id, distance, metadata in results:
-    print(f"{id}: {distance:.4f}")
-
-# Update
-db.update("doc1", vector=new_vector, metadata={"title": "updated"})
-
-# Delete
+db.upsert("doc1", new_vector, metadata)
 db.delete("doc1")
-
-# Check membership
-"doc1" in db
-len(db)
-
-# Persist to disk (graph structure saved — instant reload)
-db.save()
+db.get("doc1")                          # → (vector, metadata)
+"doc1" in db                            # → True
+db.save()                               # persist to disk
 ```
 
-### Metrics
+## Node
 
-- `"cosine"` (default) — cosine distance
-- `"euclidean"` / `"l2"` — squared L2 distance
-- `"dot"` / `"dot_product"` — negative dot product
+```javascript
+const { VctrsDatabase } = require("@yang-29/vctrs");
 
-### Tuning search
+const db = new VctrsDatabase("./mydb", 384, "cosine");
 
-```python
-# ef_search controls recall vs speed. Higher = better recall, slower.
-results = db.search(query, k=10, ef_search=300)
+db.add("doc1", vector, { title: "hello" });
+db.addMany(ids, vectors);
+
+const results = db.search(queryVector, 10); // → [{ id, distance, metadata }, ...]
+
+db.save();
 ```
 
-## Benchmarks
+Metrics: `"cosine"` (default), `"euclidean"`, `"dot"`.
 
-100,000 vectors, 384 dimensions, Apple M-series:
+## Performance
 
-### Speed
+10,000 vectors, 384 dimensions, cosine, Apple M-series:
 
-| Operation | vctrs | ChromaDB | numpy brute-force |
-|-----------|-------|----------|-------------------|
-| **Insert 100k** | 39s | 70s | — |
-| **Search k=10** | **0.89ms** | 2.04ms | 3.44ms |
-| **Search k=100** | **0.72ms** | 2.49ms | — |
-| **Load from disk** | 323ms | — | — |
-| **Get by id** | <0.01ms | — | — |
+| | vctrs | ChromaDB | numpy |
+|---|---|---|---|
+| Search k=10 | **0.14ms** | 0.93ms | 0.16ms |
+| Insert 10k | **518ms** | 2367ms | — |
+| Load from disk | **1.2ms** | 1.6ms | — |
 
-3-4x faster than ChromaDB on search, 4x faster than numpy brute-force.
+**6-7x faster than ChromaDB.** Matches raw numpy. Uses Apple Accelerate / OpenBLAS for batch distance computation, mmap for instant loads.
 
-### Recall (search quality)
+<details>
+<summary>How it works</summary>
 
-Measured against brute-force ground truth at 10k vectors (higher is better):
+- HNSW index with flat contiguous vector storage for cache locality
+- Auto brute-force for small datasets (100% recall, BLAS-accelerated)
+- Memory-mapped vectors — zero-copy load, OS-managed paging
+- SimSIMD for per-vector SIMD (ARM NEON, x86 AVX2/512)
+- Rayon for parallel index construction
+- PyO3 + maturin for zero-copy Python/numpy bindings
 
-| k | vctrs | ChromaDB |
-|---|-------|----------|
-| 1 | **92%** | 76% |
-| 10 | **91%** | 76% |
-| 50 | **85%** | 68% |
+</details>
 
-vctrs is both faster and more accurate than ChromaDB out of the box.
+## Rust
 
-## How it works
+```toml
+[dependencies]
+vctrs-core = "0.1"
+```
 
-- **HNSW** index for O(log n) approximate nearest neighbor search
-- **SimSIMD** for hardware-accelerated distance computation (ARM NEON, x86 AVX2/512)
-- **Rayon** for parallel index construction
-- **Graph serialization** — saves the full HNSW structure so loading is instant (no rebuild)
-- **PyO3** + **maturin** for zero-copy Python bindings with numpy support
+```rust
+use vctrs_core::db::Database;
+use vctrs_core::distance::Metric;
 
-## Building from source
+let db = Database::open_or_create("./mydb", 384, Metric::Cosine)?;
+db.add("doc1", embedding, Some(json!({"title": "hello"})))?;
+let results = db.search(&query, 10, None, None)?;
+```
+
+## Examples
+
+See [`examples/`](./examples) for complete applications:
+
+- **[Semantic Search](./examples/semantic-search/)** — search over documents with sentence embeddings
+- **[Deduplication](./examples/dedup/)** — find near-duplicate items in a dataset
+- **[RAG](./examples/rag/)** — retrieval-augmented generation with local LLM
+
+## Build from source
 
 ```bash
-pip install maturin
-git clone https://github.com/yang-29/vctrs.git
-cd vctrs
+git clone https://github.com/yang-29/vctrs.git && cd vctrs
 python -m venv .venv && source .venv/bin/activate
 pip install numpy maturin
 maturin develop --release

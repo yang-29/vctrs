@@ -45,7 +45,8 @@ def main():
     # --- ChromaDB ---
     print(f"\nChromaDB:")
     with tempfile.TemporaryDirectory() as tmp:
-        client = chromadb.PersistentClient(path=os.path.join(tmp, "chroma"))
+        chroma_path = os.path.join(tmp, "chroma")
+        client = chromadb.PersistentClient(path=chroma_path)
         collection = client.create_collection("bench", metadata={"hnsw:space": "cosine"})
 
         def chroma_insert():
@@ -63,6 +64,14 @@ def main():
                 lambda k=k: collection.query(query_embeddings=[query_list], n_results=k),
                 iterations=50,
             )
+
+        del collection
+        del client
+        def chroma_load():
+            c = chromadb.PersistentClient(path=chroma_path)
+            col = c.get_collection("bench")
+            col.query(query_embeddings=[query_list], n_results=1)
+        chroma_load_time = bench("load from disk", chroma_load)
 
     # --- numpy brute-force ---
     print(f"\nnumpy brute-force:")
@@ -94,6 +103,10 @@ def main():
     print(f"\nInsert 10k:")
     print(f"  vctrs:    {vctrs_insert*1000:.0f}ms")
     print(f"  ChromaDB: {chroma_insert_time*1000:.0f}ms  ({chroma_insert_time/vctrs_insert:.1f}x slower)")
+
+    print(f"\nLoad from disk:")
+    print(f"  ChromaDB: {chroma_load_time*1000:.1f}ms (mmap — lazy, doesn't read all data)")
+    print(f"  vctrs:    loads full index into RAM (instant search after load)")
 
 
 if __name__ == "__main__":
