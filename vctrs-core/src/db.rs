@@ -459,12 +459,14 @@ impl Database {
 
         let internal_id = self.index.write().insert(vector);
 
-        id_map.insert(id.to_string(), internal_id);
-        drop(id_map);
-
+        // Push metadata and reverse_map BEFORE exposing the id in id_map,
+        // so other threads can't see the id before its metadata is ready.
         self.reverse_map.write().push(id.to_string());
         self.meta_index.write().index(internal_id, &metadata);
         self.metadata.write().push(metadata);
+
+        id_map.insert(id.to_string(), internal_id);
+        drop(id_map);
 
         Ok(())
     }
