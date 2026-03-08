@@ -35,7 +35,9 @@
     "*.node"
   ],
   "devDependencies": {
-    "@napi-rs/cli": "^2"
+    "@napi-rs/cli": "^2",
+    "typedoc": "^0.28.17",
+    "typedoc-plugin-markdown": "^4.10.0"
   },
   "scripts": {
     "build": "napi build --platform --release"

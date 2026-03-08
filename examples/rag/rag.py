@@ -28,7 +28,6 @@ def build_index():
     model = SentenceTransformer("all-MiniLM-L6-v2")
     dim = model.get_sentence_embedding_dimension()
     db = Database("./rag_db", dim=dim, metric="cosine")
-
     if len(db) == 0:
         print("Indexing chunks...")
         vectors = model.encode(CHUNKS)
@@ -44,7 +43,7 @@ def retrieve(db, model, query, k=3):
     query_vec = model.encode(query)
     results = db.search(query_vec, k=k)
     return [meta["text"] for _, _, meta in results]
-
+    
 
 def generate(query, context_chunks):
     # Try OpenAI. If no API key, just print the retrieved context.

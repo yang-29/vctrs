@@ -167,7 +167,8 @@ impl PyDatabase {
     /// Search for the k nearest neighbors.
     /// Returns list of SearchResult objects with .id, .distance, .metadata attributes.
     /// `where_filter`: optional dict like {"field": "value"} or {"field": {"$ne": "value"}}
-    #[pyo3(signature = (vector, k = 10, ef_search = None, where_filter = None))]
+    /// `max_distance`: optional float — discard results beyond this distance.
+    #[pyo3(signature = (vector, k = 10, ef_search = None, where_filter = None, max_distance = None))]
     fn search(
         &self,
         py: Python<'_>,
@@ -175,12 +176,13 @@ impl PyDatabase {
         k: usize,
         ef_search: Option<usize>,
         where_filter: Option<&Bound<'_, PyDict>>,
+        max_distance: Option<f32>,
     ) -> PyResult<Vec<PySearchResult>> {
         let vec = vector.to_vec()?;
         let filter = where_filter.map(parse_filter).transpose()?;
 
         let results = py.allow_threads(|| {
-            self.inner.search(&vec, k, ef_search, filter.as_ref())
+            self.inner.search(&vec, k, ef_search, filter.as_ref(), max_distance)
                 .map_err(|e| PyValueError::new_err(e.to_string()))
         })?;
 
@@ -194,19 +196,24 @@ impl PyDatabase {
     }
 
     /// Search multiple queries in parallel. Returns list of list of SearchResult.
-    #[pyo3(signature = (vectors, k = 10, ef_search = None))]
+    /// `where_filter`: optional metadata filter (same syntax as search).
+    /// `max_distance`: optional float — discard results beyond this distance.
+    #[pyo3(signature = (vectors, k = 10, ef_search = None, where_filter = None, max_distance = None))]
     fn search_many(
         &self,
         py: Python<'_>,
         vectors: BatchVectorInput<'_>,
         k: usize,
         ef_search: Option<usize>,
+        where_filter: Option<&Bound<'_, PyDict>>,
+        max_distance: Option<f32>,
     ) -> PyResult<Vec<Vec<PySearchResult>>> {
         let vecs = vectors.to_vecs()?;
         let queries: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
+        let filter = where_filter.map(parse_filter).transpose()?;
 
         let results = py.allow_threads(|| {
-            self.inner.search_many(&queries, k, ef_search, None)
+            self.inner.search_many(&queries, k, ef_search, filter.as_ref(), max_distance)
                 .map_err(|e| PyValueError::new_err(e.to_string()))
         })?;
 
@@ -257,6 +264,64 @@ impl PyDatabase {
             self.inner.update(&id, vec, meta)
                 .map_err(|e| PyValueError::new_err(e.to_string()))
         })
+    }
+
+    /// Batch upsert — inserts new vectors, updates existing ones.
+    #[pyo3(signature = (ids, vectors, metadatas = None))]
+    fn upsert_many(
+        &self,
+        py: Python<'_>,
+        ids: Vec<String>,
+        vectors: BatchVectorInput<'_>,
+        metadatas: Option<&Bound<'_, PyList>>,
+    ) -> PyResult<()> {
+        let vecs = vectors.to_vecs()?;
+
+        if ids.len() != vecs.len() {
+            return Err(PyValueError::new_err(format!(
+                "ids length ({}) != vectors length ({})",
+                ids.len(), vecs.len()
+            )));
+        }
+
+        let metas: Vec<Option<serde_json::Value>> = match metadatas {
+            Some(list) => {
+                if list.len() != ids.len() {
+                    return Err(PyValueError::new_err(format!(
+                        "metadatas length ({}) != ids length ({})",
+                        list.len(), ids.len()
+                    )));
+                }
+                list.iter()
+                    .map(|item| {
+                        if item.is_none() {
+                            Ok(None)
+                        } else {
+                            let dict = item.downcast::<PyDict>()
+                                .map_err(|_| PyValueError::new_err("metadatas must be list of dicts or None"))?;
+                            pythonize_dict(dict).map(Some)
+                        }
+                    })
+                    .collect::<PyResult<Vec<_>>>()?
+            }
+            None => vec![None; ids.len()],
+        };
+
+        let items: Vec<_> = ids.into_iter().zip(vecs).zip(metas)
+            .map(|((id, vec), meta)| (id, vec, meta))
+            .collect();
+
+        py.allow_threads(|| {
+            self.inner.upsert_many(items)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+    }
+
+    /// Count vectors matching a filter, or all vectors if no filter.
+    #[pyo3(signature = (where_filter = None))]
+    fn count(&self, where_filter: Option<&Bound<'_, PyDict>>) -> PyResult<usize> {
+        let filter = where_filter.map(parse_filter).transpose()?;
+        Ok(self.inner.count(filter.as_ref()))
     }
 
     fn __contains__(&self, id: &str) -> bool {

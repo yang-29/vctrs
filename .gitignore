@@ -8,4 +8,5 @@ dist/
 .venv/
 node/node_modules/
 node/*.node
-*.d.ts
+site/
+.playwright-mcp/

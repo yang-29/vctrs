@@ -1,7 +1,4 @@
-"""Find near-duplicate items in a dataset using vector similarity.
-
-This is where vctrs shines — batch search in tight loops. Comparing every
-item against every other item would be O(n²). With HNSW we get O(n log n).
+"""Find near-duplicate items using vector similarity.
 
 Usage:
     pip install vctrs sentence-transformers

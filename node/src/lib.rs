@@ -118,6 +118,7 @@ impl VctrsDatabase {
     /// Search for k nearest neighbors.
     /// `whereFilter`: optional object like { field: "value" }, { field: { $ne: "value" } },
     /// { field: { $in: ["a", "b"] } }, or { field: { $gt: 10, $lte: 20 } }
+    /// `maxDistance`: optional number — discard results beyond this distance.
     #[napi]
     pub fn search(
         &self,
@@ -125,21 +126,22 @@ impl VctrsDatabase {
         k: Option<u32>,
         ef_search: Option<u32>,
         where_filter: Option<serde_json::Value>,
+        max_distance: Option<f64>,
     ) -> Result<Vec<SearchResult>> {
         let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
+        let max_dist = max_distance.map(|d| d as f32);
 
-        let results = self.inner.search(&vec_f32, k, ef, filter.as_ref())
+        let results = self.inner.search(&vec_f32, k, ef, filter.as_ref(), max_dist)
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(convert_results(results))
     }
 
     /// Search multiple queries in parallel. Returns array of result arrays.
-    /// `whereFilter`: optional object like { field: "value" }, { field: { $ne: "value" } },
-    /// { field: { $in: ["a", "b"] } }, or { field: { $gt: 10, $lte: 20 } }
+    /// `maxDistance`: optional number — discard results beyond this distance.
     #[napi]
     pub fn search_many(
         &self,
@@ -147,6 +149,7 @@ impl VctrsDatabase {
         k: Option<u32>,
         ef_search: Option<u32>,
         where_filter: Option<serde_json::Value>,
+        max_distance: Option<f64>,
     ) -> Result<Vec<Vec<SearchResult>>> {
         let vecs_f32: Vec<Vec<f32>> = vectors
             .iter()
@@ -156,11 +159,45 @@ impl VctrsDatabase {
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
+        let max_dist = max_distance.map(|d| d as f32);
 
-        let results = self.inner.search_many(&queries, k, ef, filter.as_ref())
+        let results = self.inner.search_many(&queries, k, ef, filter.as_ref(), max_dist)
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(results.into_iter().map(convert_results).collect())
+    }
+
+    /// Batch upsert — inserts new vectors, updates existing ones.
+    #[napi]
+    pub fn upsert_many(
+        &self,
+        ids: Vec<String>,
+        vectors: Vec<Vec<f64>>,
+        metadatas: Option<Vec<Option<serde_json::Value>>>,
+    ) -> Result<()> {
+        let metas = metadatas.unwrap_or_else(|| vec![None; ids.len()]);
+
+        if ids.len() != vectors.len() {
+            return Err(Error::from_reason(format!(
+                "ids length ({}) != vectors length ({})", ids.len(), vectors.len()
+            )));
+        }
+
+        let items: Vec<_> = ids.into_iter()
+            .zip(vectors.into_iter().map(|v| v.iter().map(|&x| x as f32).collect::<Vec<f32>>()))
+            .zip(metas)
+            .map(|((id, vec), meta)| (id, vec, meta))
+            .collect();
+
+        self.inner.upsert_many(items)
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Count vectors matching a filter, or all vectors if no filter.
+    #[napi]
+    pub fn count(&self, where_filter: Option<serde_json::Value>) -> Result<u32> {
+        let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
+        Ok(self.inner.count(filter.as_ref()) as u32)
     }
 
     #[napi]
@@ -348,11 +385,13 @@ impl VctrsDatabase {
         k: Option<u32>,
         ef_search: Option<u32>,
         where_filter: Option<serde_json::Value>,
+        max_distance: Option<f64>,
     ) -> Result<AsyncTask<SearchTask>> {
         let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
+        let max_dist = max_distance.map(|d| d as f32);
 
         Ok(AsyncTask::new(SearchTask {
             db: Arc::clone(&self.inner),
@@ -360,6 +399,7 @@ impl VctrsDatabase {
             k,
             ef,
             filter,
+            max_distance: max_dist,
         }))
     }
 
@@ -371,6 +411,7 @@ impl VctrsDatabase {
         k: Option<u32>,
         ef_search: Option<u32>,
         where_filter: Option<serde_json::Value>,
+        max_distance: Option<f64>,
     ) -> Result<AsyncTask<SearchManyTask>> {
         let vecs_f32: Vec<Vec<f32>> = vectors
             .iter()
@@ -379,6 +420,7 @@ impl VctrsDatabase {
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
+        let max_dist = max_distance.map(|d| d as f32);
 
         Ok(AsyncTask::new(SearchManyTask {
             db: Arc::clone(&self.inner),
@@ -386,6 +428,33 @@ impl VctrsDatabase {
             k,
             ef,
             filter,
+            max_distance: max_dist,
+        }))
+    }
+
+    /// Async version of upsertMany. Returns a Promise.
+    #[napi]
+    pub fn upsert_many_async(
+        &self,
+        ids: Vec<String>,
+        vectors: Vec<Vec<f64>>,
+        metadatas: Option<Vec<Option<serde_json::Value>>>,
+    ) -> Result<AsyncTask<UpsertManyTask>> {
+        let metas = metadatas.unwrap_or_else(|| vec![None; ids.len()]);
+        if ids.len() != vectors.len() {
+            return Err(Error::from_reason(format!(
+                "ids length ({}) != vectors length ({})", ids.len(), vectors.len()
+            )));
+        }
+        let items: Vec<_> = ids.into_iter()
+            .zip(vectors.into_iter().map(|v| v.iter().map(|&x| x as f32).collect::<Vec<f32>>()))
+            .zip(metas)
+            .map(|((id, vec), meta)| (id, vec, meta))
+            .collect();
+
+        Ok(AsyncTask::new(UpsertManyTask {
+            db: Arc::clone(&self.inner),
+            items,
         }))
     }
 
@@ -474,6 +543,7 @@ pub struct SearchTask {
     k: usize,
     ef: Option<usize>,
     filter: Option<Filter>,
+    max_distance: Option<f32>,
 }
 
 #[napi]
@@ -482,7 +552,7 @@ impl Task for SearchTask {
     type JsValue = Vec<SearchResult>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        self.db.search(&self.query, self.k, self.ef, self.filter.as_ref())
+        self.db.search(&self.query, self.k, self.ef, self.filter.as_ref(), self.max_distance)
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
@@ -497,6 +567,7 @@ pub struct SearchManyTask {
     k: usize,
     ef: Option<usize>,
     filter: Option<Filter>,
+    max_distance: Option<f32>,
 }
 
 #[napi]
@@ -506,12 +577,32 @@ impl Task for SearchManyTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         let refs: Vec<&[f32]> = self.queries.iter().map(|v| v.as_slice()).collect();
-        self.db.search_many(&refs, self.k, self.ef, self.filter.as_ref())
+        self.db.search_many(&refs, self.k, self.ef, self.filter.as_ref(), self.max_distance)
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(output.into_iter().map(convert_results).collect())
+    }
+}
+
+pub struct UpsertManyTask {
+    db: Arc<Database>,
+    items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
+}
+
+#[napi]
+impl Task for UpsertManyTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.upsert_many(std::mem::take(&mut self.items))
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
     }
 }
 

@@ -1,0 +1,99 @@
+site_name: vctrs
+site_description: A fast embedded vector database. Rust core, Python and Node bindings.
+site_url: https://yang-29.github.io/vctrs/
+repo_url: https://github.com/yang-29/vctrs
+repo_name: yang-29/vctrs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - content.code.copy
+    - content.code.annotate
+    - navigation.instant
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
+  - toc:
+      permalink: true
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: google
+            docstring_section_style: spacy
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            heading_level: 2
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            line_length: 80
+            members_order: source
+            filters: ["!^_"]
+            allow_inspection: false
+
+nav:
+  - Home: index.md
+  - Python:
+    - Getting Started: python/index.md
+    - API Reference: python/api.md
+  - Node.js:
+    - Getting Started: node/index.md
+    - API Reference: node/api.md
+    - VctrsDatabase: node/typedoc/Class.VctrsDatabase.md
+    - SearchResult: node/typedoc/Interface.SearchResult.md
+    - GetResult: node/typedoc/Interface.GetResult.md
+    - VctrsStats: node/typedoc/Interface.VctrsStats.md
+    - WhereFilter: node/typedoc/TypeAlias.WhereFilter.md
+  - Examples:
+    - Semantic Search: examples/semantic-search.md
+    - Deduplication: examples/dedup.md
+    - RAG: examples/rag.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/yang-29/vctrs

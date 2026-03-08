@@ -1,0 +1,21 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["./index.d.ts"],
+  "out": "../docs/node/typedoc",
+  "plugin": ["typedoc-plugin-markdown"],
+  "outputFileStrategy": "members",
+  "flattenOutputFiles": true,
+  "hidePageHeader": true,
+  "hidePageTitle": true,
+  "hideGroupHeadings": false,
+  "useCodeBlocks": true,
+  "expandObjects": true,
+  "parametersFormat": "table",
+  "propertiesFormat": "table",
+  "enumMembersFormat": "table",
+  "typeDeclarationFormat": "table",
+  "indexFormat": "table",
+  "name": "vctrs",
+  "readme": "none",
+  "includeVersion": false
+}

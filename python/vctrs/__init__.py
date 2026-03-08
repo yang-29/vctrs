@@ -36,14 +36,19 @@ class AsyncDatabase:
     async def add_many(self, ids, vectors, metadatas=None):
         return await asyncio.to_thread(self._db.add_many, ids, vectors, metadatas)
 
-    async def search(self, vector, k=10, ef_search=None, where_filter=None):
+    async def upsert_many(self, ids, vectors, metadatas=None):
+        return await asyncio.to_thread(self._db.upsert_many, ids, vectors, metadatas)
+
+    async def search(self, vector, k=10, ef_search=None, where_filter=None, max_distance=None):
         return await asyncio.to_thread(
-            partial(self._db.search, vector, k=k, ef_search=ef_search, where_filter=where_filter)
+            partial(self._db.search, vector, k=k, ef_search=ef_search,
+                    where_filter=where_filter, max_distance=max_distance)
         )
 
-    async def search_many(self, vectors, k=10, ef_search=None):
+    async def search_many(self, vectors, k=10, ef_search=None, where_filter=None, max_distance=None):
         return await asyncio.to_thread(
-            partial(self._db.search_many, vectors, k=k, ef_search=ef_search)
+            partial(self._db.search_many, vectors, k=k, ef_search=ef_search,
+                    where_filter=where_filter, max_distance=max_distance)
         )
 
     async def get(self, id):
@@ -62,6 +67,9 @@ class AsyncDatabase:
 
     async def compact(self):
         return await asyncio.to_thread(self._db.compact)
+
+    def count(self, where_filter=None):
+        return self._db.count(where_filter=where_filter)
 
     # Sync properties (fast, no I/O).
     def __contains__(self, id):

@@ -10,7 +10,7 @@
         db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
         db.add("c", vec![0.0, 0.0, 1.0], None).unwrap();
 
-        let results = db.search(&[0.9, 0.1, 0.0], 2, None, None).unwrap();
+        let results = db.search(&[0.9, 0.1, 0.0], 2, None, None, None).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "a");
     }
@@ -68,17 +68,17 @@
         db.add("c", vec![0.8, 0.2], Some(serde_json::json!({"cat": "sci"}))).unwrap();
 
         // Unfiltered: a is closest.
-        let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
+        let results = db.search(&[1.0, 0.0], 1, None, None, None).unwrap();
         assert_eq!(results[0].id, "a");
 
         // Filtered to cat=art: b is the only match.
         let filter = Filter::Eq("cat".to_string(), serde_json::json!("art"));
-        let results = db.search(&[1.0, 0.0], 1, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 1, None, Some(&filter), None).unwrap();
         assert_eq!(results[0].id, "b");
 
         // Filtered to cat=sci: a is closest.
         let filter = Filter::Eq("cat".to_string(), serde_json::json!("sci"));
-        let results = db.search(&[1.0, 0.0], 2, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 2, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "a");
         assert_eq!(results[1].id, "c");
@@ -117,7 +117,7 @@
             assert_eq!(vec, vec![1.0, 2.0]);
             assert!(meta.is_some());
 
-            let results = db.search(&[1.0, 2.0], 1, None, None).unwrap();
+            let results = db.search(&[1.0, 2.0], 1, None, None, None).unwrap();
             assert_eq!(results[0].id, "x");
         }
     }
@@ -148,7 +148,7 @@
         assert_eq!(db.len(), 2);
         assert!(!db.contains("b"));
 
-        let results = db.search(&[0.0, 1.0, 0.0], 3, None, None).unwrap();
+        let results = db.search(&[0.0, 1.0, 0.0], 3, None, None, None).unwrap();
         assert!(results.iter().all(|r| r.id != "b"));
     }
 
@@ -184,7 +184,7 @@
         db.add_many(items).unwrap();
         assert_eq!(db.len(), 3);
 
-        let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
+        let results = db.search(&[1.0, 0.0], 1, None, None, None).unwrap();
         assert_eq!(results[0].id, "a");
     }
 
@@ -213,7 +213,7 @@
         assert_eq!(db.deleted_count(), 0);
 
         // Search still works.
-        let results = db.search(&[1.0, 0.0, 0.0], 1, None, None).unwrap();
+        let results = db.search(&[1.0, 0.0, 0.0], 1, None, None, None).unwrap();
         assert_eq!(results[0].id, "a");
 
         // Metadata preserved.
@@ -250,7 +250,7 @@
             assert!(!db.contains("b"));
             assert!(db.contains("c"));
 
-            let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
+            let results = db.search(&[1.0, 0.0], 1, None, None, None).unwrap();
             assert_eq!(results[0].id, "a");
 
             let (_, meta) = db.get("c").unwrap();
@@ -305,7 +305,7 @@
         assert_eq!(db.len(), 2);
         assert_eq!(db.total_slots(), 2);
 
-        let results = db.search(&[0.5, 0.5], 1, None, None).unwrap();
+        let results = db.search(&[0.5, 0.5], 1, None, None, None).unwrap();
         assert_eq!(results[0].id, "c");
     }
 
@@ -349,7 +349,7 @@
         let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
         db.add("a", vec![1.0, 0.0, 0.0], None).unwrap();
 
-        let result = db.search(&[1.0, 0.0], 1, None, None);
+        let result = db.search(&[1.0, 0.0], 1, None, None, None);
         assert!(result.is_err());
     }
 
@@ -445,7 +445,7 @@
         let path = dir.path().join("testdb");
         let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
 
-        let results = db.search(&[1.0, 0.0], 10, None, None).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, None, None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -459,7 +459,7 @@
         db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"cat": "y"}))).unwrap();
 
         let filter = Filter::Eq("cat".to_string(), serde_json::json!("z"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert!(results.is_empty());
     }
 
@@ -474,7 +474,7 @@
         db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
 
         let filter = Filter::Ne("cat".to_string(), serde_json::json!("x"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "b");
     }
@@ -490,7 +490,7 @@
         db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "z"}))).unwrap();
 
         let filter = Filter::In("cat".to_string(), vec![serde_json::json!("x"), serde_json::json!("z")]);
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 2);
         let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"a"));
@@ -511,7 +511,7 @@
             Filter::Eq("cat".to_string(), serde_json::json!("x")),
             Filter::Eq("val".to_string(), serde_json::json!(2)),
         ]);
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "b");
     }
@@ -530,7 +530,7 @@
             Filter::Eq("cat".to_string(), serde_json::json!("x")),
             Filter::Eq("cat".to_string(), serde_json::json!("z")),
         ]);
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -545,7 +545,7 @@
         db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
 
         let filter = Filter::Eq("cat".to_string(), serde_json::json!("x"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "b");
     }
@@ -564,7 +564,7 @@
 
         // Filtered search should work after compact.
         let filter = Filter::Eq("cat".to_string(), serde_json::json!("x"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id, "a");
     }
@@ -581,7 +581,7 @@
         // Move "a" to be near "b".
         db.upsert("a", vec![0.0, 1.0], None).unwrap();
 
-        let results = db.search(&[0.0, 1.0], 2, None, None).unwrap();
+        let results = db.search(&[0.0, 1.0], 2, None, None, None).unwrap();
         // Both should be found at [0,1].
         let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
         assert!(ids.contains(&"a"));
@@ -601,7 +601,7 @@
         let filter = Filter::Eq("cat".to_string(), serde_json::json!("x"));
         let results = db.search_many(
             &[&[1.0, 0.0], &[0.0, 1.0]],
-            10, None, Some(&filter),
+            10, None, Some(&filter), None,
         ).unwrap();
 
         assert_eq!(results.len(), 2);
@@ -631,7 +631,7 @@
         {
             let db = Database::open(path.to_str().unwrap()).unwrap();
             assert!(db.has_quantized_search());
-            let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
+            let results = db.search(&[1.0, 0.0], 1, None, None, None).unwrap();
             assert_eq!(results[0].id, "a");
         }
     }
@@ -665,7 +665,7 @@
             let (_, meta) = db.get("a").unwrap();
             assert_eq!(meta.unwrap()["k"], 1);
 
-            let results = db.search(&[1.0, 0.0, 0.0], 1, None, None).unwrap();
+            let results = db.search(&[1.0, 0.0, 0.0], 1, None, None, None).unwrap();
             assert_eq!(results[0].id, "a");
 
             // Can insert new items after load.
@@ -768,7 +768,7 @@
         db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
         db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"score": 30}))).unwrap();
 
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("score".into(), 15.0))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("score".into(), 15.0)), None).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.id != "a"));
     }
@@ -782,7 +782,7 @@
         db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"score": 10}))).unwrap();
         db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
 
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gte("score".into(), 20.0))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gte("score".into(), 20.0)), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "b");
     }
@@ -797,7 +797,7 @@
         db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
         db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"score": 30}))).unwrap();
 
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Lt("score".into(), 25.0))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Lt("score".into(), 25.0)), None).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.id != "c"));
     }
@@ -811,7 +811,7 @@
         db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"score": 10}))).unwrap();
         db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
 
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Lte("score".into(), 10.0))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Lte("score".into(), 10.0)), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "a");
     }
@@ -835,7 +835,7 @@
             Filter::Gte("val".into(), 3.0),
             Filter::Lt("val".into(), 7.0),
         ]);
-        let results = db.search(&[5.0, 0.0], 10, None, Some(&filter)).unwrap();
+        let results = db.search(&[5.0, 0.0], 10, None, Some(&filter), None).unwrap();
         assert_eq!(results.len(), 4); // 3, 4, 5, 6
         for r in &results {
             let val = r.metadata.as_ref().unwrap()["val"].as_i64().unwrap();
@@ -853,7 +853,7 @@
         db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"score": 10}))).unwrap();
 
         // $gt on a string field should return no match for that doc.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("name".into(), 5.0))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("name".into(), 5.0)), None).unwrap();
         assert!(results.iter().all(|r| r.id != "a"), "string field matched numeric $gt");
     }
 
@@ -866,7 +866,7 @@
         db.add("a", vec![1.0, 0.0], None).unwrap();
         db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"score": 10}))).unwrap();
 
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("score".into(), 5.0))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("score".into(), 5.0)), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "b");
     }
@@ -884,12 +884,12 @@
         db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "y"}))).unwrap();
 
         // Both a and b match cat=x.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 2);
 
         // Delete a — meta index should remove it.
         db.delete("a").unwrap();
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "b");
     }
@@ -904,7 +904,7 @@
         db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"cat": "y"}))).unwrap();
 
         // a has cat=x.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "a");
 
@@ -912,11 +912,11 @@
         db.update("a", None, Some(Some(serde_json::json!({"cat": "y"})))).unwrap();
 
         // Now cat=x should return nothing.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 0);
 
         // And cat=y should return both.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("y")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("y"))), None).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -932,11 +932,11 @@
         db.upsert("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "z"}))).unwrap();
 
         // Old value should be gone.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 0);
 
         // New value should be present.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("z")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("z"))), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "a");
     }
@@ -955,12 +955,12 @@
         db.compact().unwrap();
 
         // After compact, filtered search should still work with the inverted index.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.id == "a" || r.id == "c"));
 
         // y was deleted.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("y")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("y"))), None).unwrap();
         assert_eq!(results.len(), 0);
     }
 
@@ -978,7 +978,7 @@
 
         // Reopen — meta_index should be rebuilt from loaded metadata.
         let db = Database::open(path.to_str().unwrap()).unwrap();
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "a");
     }
@@ -995,7 +995,7 @@
             ("c".into(), vec![0.0, 1.0], Some(serde_json::json!({"cat": "x"}))),
         ]).unwrap();
 
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x")))).unwrap();
+        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Eq("cat".into(), serde_json::json!("x"))), None).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -1034,7 +1034,7 @@
             assert_eq!(meta.unwrap()["v"], 2);
 
             // Search should find all three.
-            let results = db.search(&[1.0, 0.0], 3, None, None).unwrap();
+            let results = db.search(&[1.0, 0.0], 3, None, None, None).unwrap();
             assert_eq!(results.len(), 3);
         }
     }
@@ -1186,7 +1186,7 @@
             let db = Arc::clone(&db);
             handles.push(thread::spawn(move || {
                 for _ in 0..50 {
-                    let _ = db.search(&[1.0, 0.0, 0.0, 0.0], 5, None, None).unwrap();
+                    let _ = db.search(&[1.0, 0.0, 0.0, 0.0], 5, None, None, None).unwrap();
                     let _ = db.len();
                     let _ = db.ids();
                 }
@@ -1228,7 +1228,7 @@
                 for _ in 0..20 {
                     let results = db.search_many(
                         &[&[0.0, 20.0], &[19.0, 1.0]],
-                        5, None, Some(&filter),
+                        5, None, Some(&filter), None,
                     ).unwrap();
                     assert_eq!(results.len(), 2);
                     for batch in &results {
@@ -1310,4 +1310,144 @@
             let db = Database::open(path.to_str().unwrap()).unwrap();
             assert_eq!(db.len(), 2);
         }
+    }
+
+    // -- max_distance tests ---------------------------------------------------
+
+    #[test]
+    fn test_search_max_distance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("max_dist_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+
+        // Insert vectors at known squared-euclidean distances from [1,0].
+        db.add("close", vec![0.9, 0.0], None).unwrap();   // dist² = 0.01
+        db.add("mid", vec![0.5, 0.0], None).unwrap();     // dist² = 0.25
+        db.add("far", vec![-1.0, 0.0], None).unwrap();    // dist² = 4.0
+
+        // No threshold — all 3 returned.
+        let results = db.search(&[1.0, 0.0], 10, None, None, None).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Threshold 0.3 — only "close" and "mid" (dist² ≤ 0.25).
+        let results = db.search(&[1.0, 0.0], 10, None, None, Some(0.3)).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.distance <= 0.3));
+
+        // Threshold 0.005 — nothing close enough.
+        let results = db.search(&[1.0, 0.0], 10, None, None, Some(0.005)).unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_search_many_max_distance() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("max_dist_many_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
+
+        db.add("a", vec![1.0, 0.0], None).unwrap();
+        db.add("b", vec![0.0, 1.0], None).unwrap();
+        db.add("c", vec![-1.0, 0.0], None).unwrap();
+
+        let queries: Vec<&[f32]> = vec![&[1.0, 0.0], &[0.0, 1.0]];
+        let results = db.search_many(&queries, 10, None, None, Some(0.5)).unwrap();
+        assert_eq!(results.len(), 2);
+        // Each query should find only its exact match (distance 0).
+        for batch in &results {
+            assert!(batch.iter().all(|r| r.distance <= 0.5));
+        }
+    }
+
+    // -- upsert_many tests ----------------------------------------------------
+
+    #[test]
+    fn test_upsert_many_all_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upsert_many_new_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        let items = vec![
+            ("a".to_string(), vec![1.0, 0.0], None),
+            ("b".to_string(), vec![0.0, 1.0], None),
+        ];
+        db.upsert_many(items).unwrap();
+        assert_eq!(db.len(), 2);
+    }
+
+    #[test]
+    fn test_upsert_many_mixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upsert_many_mixed_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"v": 1}))).unwrap();
+
+        // "a" exists (update), "b" is new (insert).
+        let items = vec![
+            ("a".to_string(), vec![0.0, 1.0], Some(serde_json::json!({"v": 2}))),
+            ("b".to_string(), vec![1.0, 0.0], None),
+        ];
+        db.upsert_many(items).unwrap();
+        assert_eq!(db.len(), 2);
+
+        let (vec_a, meta_a) = db.get("a").unwrap();
+        assert!((vec_a[1] - 1.0).abs() < 0.01); // updated vector
+        assert_eq!(meta_a.unwrap()["v"], 2);
+    }
+
+    #[test]
+    fn test_upsert_many_wrong_dim() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("upsert_many_dim_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        let items = vec![
+            ("a".to_string(), vec![1.0, 0.0, 0.0], None), // wrong dim
+        ];
+        assert!(db.upsert_many(items).is_err());
+    }
+
+    // -- count tests ----------------------------------------------------------
+
+    #[test]
+    fn test_count_no_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("count_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        assert_eq!(db.count(None), 0);
+        db.add("a", vec![1.0, 0.0], None).unwrap();
+        db.add("b", vec![0.0, 1.0], None).unwrap();
+        assert_eq!(db.count(None), 2);
+    }
+
+    #[test]
+    fn test_count_with_eq_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("count_eq_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"color": "red"}))).unwrap();
+        db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"color": "blue"}))).unwrap();
+        db.add("c", vec![0.5, 0.5], Some(serde_json::json!({"color": "red"}))).unwrap();
+
+        let filter = Filter::Eq("color".to_string(), serde_json::json!("red"));
+        assert_eq!(db.count(Some(&filter)), 2);
+
+        let filter2 = Filter::Eq("color".to_string(), serde_json::json!("green"));
+        assert_eq!(db.count(Some(&filter2)), 0);
+    }
+
+    #[test]
+    fn test_count_with_gt_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("count_gt_db");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"score": 10}))).unwrap();
+        db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"score": 50}))).unwrap();
+        db.add("c", vec![0.5, 0.5], Some(serde_json::json!({"score": 90}))).unwrap();
+
+        let filter = Filter::Gt("score".to_string(), 40.0);
+        assert_eq!(db.count(Some(&filter)), 2);
     }

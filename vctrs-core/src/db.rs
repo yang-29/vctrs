@@ -535,6 +535,99 @@ impl Database {
         Ok(())
     }
 
+    /// Batch upsert — inserts new vectors, updates existing ones.
+    pub fn upsert_many(
+        &self,
+        items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
+    ) -> Result<()> {
+        for (_, vector, _) in &items {
+            if vector.len() != self.dim {
+                return Err(VctrsError::DimensionMismatch { expected: self.dim, got: vector.len() });
+            }
+        }
+
+        // WAL: log all items as Add entries (replay uses upsert semantics).
+        {
+            let mut wal = self.wal.lock();
+            for (id, vector, metadata) in &items {
+                wal.append(&WalEntry::Add {
+                    id: id.clone(),
+                    vector: vector.clone(),
+                    metadata: metadata.clone(),
+                })?;
+            }
+        }
+
+        // Partition into updates (existing ids) and inserts (new ids).
+        let mut to_insert = Vec::new();
+        {
+            let id_map = self.id_map.read();
+            for (id, vector, metadata) in items {
+                if let Some(&internal_id) = id_map.get(&id) {
+                    // Update existing.
+                    self.index.write().update_vector(internal_id, vector);
+                    let mut meta_store = self.metadata.write();
+                    let mut mi = self.meta_index.write();
+                    mi.remove(internal_id, &meta_store[internal_id as usize]);
+                    mi.index(internal_id, &metadata);
+                    meta_store[internal_id as usize] = metadata;
+                } else {
+                    to_insert.push((id, vector, metadata));
+                }
+            }
+        }
+
+        if to_insert.is_empty() {
+            return Ok(());
+        }
+
+        // Batch insert the new items.
+        let mut id_map = self.id_map.write();
+        // Re-check for any that got inserted between the read and write lock.
+        let mut final_insert = Vec::new();
+        let mut final_ids = Vec::new();
+        let mut final_metas = Vec::new();
+        for (id, vector, metadata) in to_insert {
+            if let Some(&internal_id) = id_map.get(&id) {
+                self.index.write().update_vector(internal_id, vector);
+                let mut meta_store = self.metadata.write();
+                let mut mi = self.meta_index.write();
+                mi.remove(internal_id, &meta_store[internal_id as usize]);
+                mi.index(internal_id, &metadata);
+                meta_store[internal_id as usize] = metadata;
+            } else {
+                final_ids.push(id);
+                final_insert.push(vector);
+                final_metas.push(metadata);
+            }
+        }
+
+        if final_insert.is_empty() {
+            return Ok(());
+        }
+
+        let internal_ids = self.index.write().batch_insert(final_insert);
+
+        let mut reverse_map = self.reverse_map.write();
+        let mut metadata = self.metadata.write();
+        let mut mi = self.meta_index.write();
+
+        for (i, id) in final_ids.into_iter().enumerate() {
+            id_map.insert(id.clone(), internal_ids[i]);
+            while reverse_map.len() <= internal_ids[i] as usize {
+                reverse_map.push(String::new());
+            }
+            reverse_map[internal_ids[i] as usize] = id;
+            while metadata.len() <= internal_ids[i] as usize {
+                metadata.push(None);
+            }
+            mi.index(internal_ids[i], &final_metas[i]);
+            metadata[internal_ids[i] as usize] = final_metas[i].clone();
+        }
+
+        Ok(())
+    }
+
     pub fn delete(&self, id: &str) -> Result<bool> {
         let internal_id = {
             let mut id_map = self.id_map.write();
@@ -598,12 +691,14 @@ impl Database {
     }
 
     /// Search for the k nearest neighbors, optionally filtered by metadata.
+    /// If `max_distance` is set, results beyond that distance are discarded.
     pub fn search(
         &self,
         query: &[f32],
         k: usize,
         ef_search: Option<usize>,
         filter: Option<&Filter>,
+        max_distance: Option<f32>,
     ) -> Result<Vec<SearchResult>> {
         if query.len() != self.dim {
             return Err(VctrsError::DimensionMismatch { expected: self.dim, got: query.len() });
@@ -619,52 +714,35 @@ impl Database {
             base.max(k + extra)
         });
 
-        if let Some(f) = filter {
-            // Try to use the inverted index for fast set-based filtering ($eq, $in).
-            // For filters that can be resolved, we get a HashSet of matching IDs and
-            // use O(1) set membership checks instead of per-candidate JSON parsing.
+        let raw_results = if let Some(f) = filter {
             let mi = self.meta_index.read();
             let resolved = f.resolve_from_index(&mi);
             drop(mi);
 
-            let raw_results = if let Some(ref match_set) = resolved {
-                // Fast path: set membership check.
-                // For AND filters where some sub-filters were resolved and some weren't,
-                // we still need to check the unresolvable sub-filters per-candidate.
+            if let Some(ref match_set) = resolved {
                 index.search_filtered(query, k, ef, |id| {
                     match_set.contains(&id) && f.matches(&metadata[id as usize])
                 })
             } else {
-                // Fallback: per-candidate metadata scan.
                 index.search_filtered(query, k, ef, |id| {
                     f.matches(&metadata[id as usize])
                 })
-            };
-
-            let results: Vec<SearchResult> = raw_results
-                .into_iter()
-                .map(|(internal_id, dist)| SearchResult {
-                    id: reverse_map[internal_id as usize].clone(),
-                    distance: dist,
-                    metadata: metadata[internal_id as usize].clone(),
-                })
-                .collect();
-
-            return Ok(results);
+            }
         } else {
-            let raw_results = index.search(query, k, ef);
+            index.search(query, k, ef)
+        };
 
-            let results: Vec<SearchResult> = raw_results
-                .into_iter()
-                .map(|(internal_id, dist)| SearchResult {
-                    id: reverse_map[internal_id as usize].clone(),
-                    distance: dist,
-                    metadata: metadata[internal_id as usize].clone(),
-                })
-                .collect();
+        let results: Vec<SearchResult> = raw_results
+            .into_iter()
+            .filter(|(_, dist)| max_distance.map_or(true, |max| *dist <= max))
+            .map(|(internal_id, dist)| SearchResult {
+                id: reverse_map[internal_id as usize].clone(),
+                distance: dist,
+                metadata: metadata[internal_id as usize].clone(),
+            })
+            .collect();
 
-            Ok(results)
-        }
+        Ok(results)
     }
 
     /// Search multiple queries in parallel. Returns one result Vec per query.
@@ -674,6 +752,7 @@ impl Database {
         k: usize,
         ef_search: Option<usize>,
         filter: Option<&Filter>,
+        max_distance: Option<f32>,
     ) -> Result<Vec<Vec<SearchResult>>> {
         for q in queries {
             if q.len() != self.dim {
@@ -691,8 +770,18 @@ impl Database {
             base.max(k + extra)
         });
 
+        let to_results = |raw: Vec<(u32, f32)>| -> Vec<SearchResult> {
+            raw.into_iter()
+                .filter(|(_, dist)| max_distance.map_or(true, |max| *dist <= max))
+                .map(|(internal_id, dist)| SearchResult {
+                    id: reverse_map[internal_id as usize].clone(),
+                    distance: dist,
+                    metadata: metadata[internal_id as usize].clone(),
+                })
+                .collect()
+        };
+
         if let Some(f) = filter {
-            // Parallel filtered search: resolve the index once, then fan out.
             let mi = self.meta_index.read();
             let resolved = f.resolve_from_index(&mi);
             drop(mi);
@@ -709,13 +798,7 @@ impl Database {
                             f.matches(&metadata[id as usize])
                         })
                     };
-                    raw.into_iter()
-                        .map(|(internal_id, dist)| SearchResult {
-                            id: reverse_map[internal_id as usize].clone(),
-                            distance: dist,
-                            metadata: metadata[internal_id as usize].clone(),
-                        })
-                        .collect()
+                    to_results(raw)
                 })
                 .collect();
 
@@ -723,20 +806,7 @@ impl Database {
         }
 
         let raw_results = index.search_many(queries, k, ef);
-
-        Ok(raw_results
-            .into_iter()
-            .map(|results| {
-                results
-                    .into_iter()
-                    .map(|(internal_id, dist)| SearchResult {
-                        id: reverse_map[internal_id as usize].clone(),
-                        distance: dist,
-                        metadata: metadata[internal_id as usize].clone(),
-                    })
-                    .collect()
-            })
-            .collect())
+        Ok(raw_results.into_iter().map(to_results).collect())
     }
 
     pub fn get(&self, id: &str) -> Result<(Vec<f32>, Option<serde_json::Value>)> {
@@ -775,6 +845,35 @@ impl Database {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Count vectors matching a filter, or all vectors if no filter is provided.
+    pub fn count(&self, filter: Option<&Filter>) -> usize {
+        let f = match filter {
+            Some(f) => f,
+            None => return self.len(),
+        };
+
+        // Try fast path via inverted index.
+        let mi = self.meta_index.read();
+        if let Some(match_set) = f.resolve_from_index(&mi) {
+            drop(mi);
+            // For pure $eq/$in filters, the index gives us the exact count.
+            let index = self.index.read();
+            let deleted = index.deleted_ids();
+            return match_set.iter().filter(|id| !deleted.contains(id)).count();
+        }
+        drop(mi);
+
+        // Fallback: scan all live vectors.
+        let index = self.index.read();
+        let metadata = self.metadata.read();
+        let deleted = index.deleted_ids();
+        let total = index.total_slots();
+
+        (0..total as u32)
+            .filter(|id| !deleted.contains(id) && f.matches(&metadata[*id as usize]))
+            .count()
     }
 
     pub fn dim(&self) -> usize {
