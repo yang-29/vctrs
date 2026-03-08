@@ -27,17 +27,39 @@ from vctrs import Database
 
 db = Database("./mydb", dim=384, metric="cosine")
 
+# CRUD
 db.add("doc1", vector, {"title": "hello"})
-db.add_many(ids, vectors)              # batch insert (parallel HNSW)
-
-results = db.search(query_vector, k=10)  # → [(id, distance, metadata), ...]
-batch = db.search_many(query_vectors, k=10)  # parallel multi-query search
-
-db.upsert("doc1", new_vector, metadata)
+db.upsert("doc1", new_vector, {"title": "updated"})
+db.update("doc1", metadata={"title": "changed"})   # update metadata only
+db.update("doc1", vector=new_vector)                # update vector only
 db.delete("doc1")
 db.get("doc1")                          # → (vector, metadata)
 "doc1" in db                            # → True
-db.save()                               # persist to disk
+
+# Batch insert (parallel HNSW construction)
+db.add_many(ids, vectors, metadatas)
+
+# Search
+results = db.search(query_vector, k=10)  # → [SearchResult(id, distance, metadata), ...]
+batch = db.search_many(query_vectors, k=10)  # parallel multi-query search
+
+# Filtered search
+results = db.search(query, k=10, where_filter={"category": "science"})
+results = db.search(query, k=10, where_filter={"category": {"$ne": "sports"}})
+results = db.search(query, k=10, where_filter={"category": {"$in": ["sci", "tech"]}})
+results = db.search(query, k=10, where_filter={"score": {"$gte": 0.5, "$lt": 0.9}})
+
+# Maintenance
+db.compact()                # reclaim deleted vector slots
+db.enable_quantized_search()  # SQ8 quantized HNSW traversal + f32 re-ranking
+db.save()                   # persist to disk
+
+# Diagnostics
+stats = db.stats()          # → dict with graph metrics, memory usage, etc.
+
+# Context manager (auto-save on exit)
+with Database("./mydb", dim=384) as db:
+    db.add("doc1", vector)
 ```
 
 Options: `m=16` (HNSW links), `ef_construction=200` (build quality), `quantize=True` (SQ8, ~4x smaller on disk).
@@ -49,16 +71,49 @@ const { VctrsDatabase } = require("@yang-29/vctrs");
 
 const db = new VctrsDatabase("./mydb", 384, "cosine");
 
+// CRUD
 db.add("doc1", vector, { title: "hello" });
-db.addMany(ids, vectors);
+db.upsert("doc1", newVector, { title: "updated" });
+db.update("doc1", null, { title: "changed" }); // metadata only
+db.delete("doc1");
+db.get("doc1"); // → { vector, metadata }
+db.contains("doc1"); // → true
 
+// Batch
+db.addMany(ids, vectors, metadatas);
+
+// Search
 const results = db.search(queryVector, 10); // → [{ id, distance, metadata }, ...]
 const batch = db.searchMany(queryVectors, 10); // parallel multi-query search
 
+// Filtered search
+db.search(query, 10, null, { category: "science" });
+db.search(query, 10, null, { score: { $gte: 0.5, $lt: 0.9 } });
+
+// Maintenance
+db.compact();
+db.enableQuantizedSearch();
 db.save();
+
+// Diagnostics
+const stats = db.stats(); // → { numVectors, numDeleted, avgDegreeLayer0, ... }
 ```
 
-Metrics: `"cosine"` (default), `"euclidean"`, `"dot"`.
+Metrics: `"cosine"` (default), `"euclidean"` / `"l2"`, `"dot"` / `"dot_product"`.
+
+### Filter operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$eq` (default) | Equals | `{ field: "value" }` |
+| `$ne` | Not equals | `{ field: { $ne: "value" } }` |
+| `$in` | In list | `{ field: { $in: ["a", "b"] } }` |
+| `$gt` | Greater than | `{ field: { $gt: 10 } }` |
+| `$gte` | Greater than or equal | `{ field: { $gte: 10 } }` |
+| `$lt` | Less than | `{ field: { $lt: 20 } }` |
+| `$lte` | Less than or equal | `{ field: { $lte: 20 } }` |
+
+Multiple keys in a filter object are ANDed together.
 
 ## Performance
 
@@ -76,9 +131,11 @@ Metrics: `"cosine"` (default), `"euclidean"`, `"dot"`.
 <summary>How it works</summary>
 
 - HNSW index with flat contiguous vector storage for cache locality
-- Optional scalar quantization (SQ8) for ~4x smaller on-disk storage
+- Optional scalar quantization (SQ8) for ~4x smaller on-disk storage with full-precision re-ranking
+- In-graph filtered search (no over-fetch retry loop)
 - Auto brute-force for small datasets (100% recall, BLAS-accelerated)
 - Memory-mapped vectors — zero-copy load, OS-managed paging
+- GC/compaction to reclaim soft-deleted vector slots
 - SimSIMD for per-vector SIMD (ARM NEON, x86 AVX2/512)
 - Rayon for parallel index construction and batch search
 - PyO3 + maturin for zero-copy Python/numpy bindings
@@ -89,24 +146,37 @@ Metrics: `"cosine"` (default), `"euclidean"`, `"dot"`.
 
 ```toml
 [dependencies]
-vctrs-core = "0.1"
+vctrs-core = "0.2"
 ```
 
 ```rust
-use vctrs_core::db::{Database, HnswConfig};
+use vctrs_core::db::{Database, Filter, HnswConfig};
 use vctrs_core::distance::Metric;
 
 let db = Database::open_or_create("./mydb", 384, Metric::Cosine)?;
 db.add("doc1", embedding, Some(json!({"title": "hello"})))?;
+
+// Search
 let results = db.search(&query, 10, None, None)?;
+
+// Filtered search
+let filter = Filter::Gte("score".into(), 0.5);
+let results = db.search(&query, 10, None, Some(&filter))?;
 
 // Batch search (parallel)
 let batch = db.search_many(&[&q1, &q2], 10, None, None)?;
+
+// Maintenance
+db.compact()?;
+db.enable_quantized_search();
+let stats = db.stats();
 
 // Custom HNSW config + quantization
 let config = HnswConfig { m: 32, ef_construction: 400, quantize: true };
 let db = Database::open_or_create_with_config("./mydb", 384, Metric::Cosine, config)?;
 ```
+
+Errors are typed via `VctrsError` enum (`DimensionMismatch`, `DuplicateId`, `NotFound`, `Io`, etc.).
 
 ## Examples
 
