@@ -716,17 +716,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde-wasm-bindgen"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
-dependencies = [
- "js-sys",
- "serde",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -836,7 +825,7 @@ checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "vctrs"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "numpy",
  "pyo3",
@@ -847,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "vctrs-core"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "byteorder",
  "memmap2",
@@ -873,12 +862,10 @@ dependencies = [
 
 [[package]]
 name = "vctrs-wasm"
-version = "0.2.2"
+version = "0.2.4"
 dependencies = [
  "getrandom 0.2.17",
  "js-sys",
- "serde",
- "serde-wasm-bindgen",
  "serde_json",
  "vctrs-core",
  "wasm-bindgen",

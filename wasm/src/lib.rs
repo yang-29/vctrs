@@ -2,6 +2,19 @@ use vctrs_core::db::Database;
 use vctrs_core::distance::Metric;
 use wasm_bindgen::prelude::*;
 
+fn js_to_json(val: &JsValue) -> Option<serde_json::Value> {
+    if val.is_null() || val.is_undefined() {
+        return None;
+    }
+    let json_str = js_sys::JSON::stringify(val).ok()?.as_string()?;
+    serde_json::from_str(&json_str).ok()
+}
+
+fn json_to_js(val: &serde_json::Value) -> JsValue {
+    let s = serde_json::to_string(val).unwrap_or_default();
+    js_sys::JSON::parse(&s).unwrap_or(JsValue::NULL)
+}
+
 #[wasm_bindgen]
 pub struct VctrsDatabase {
     inner: Database,
@@ -25,7 +38,7 @@ impl SearchResult {
     #[wasm_bindgen(getter)]
     pub fn metadata(&self) -> JsValue {
         match &self.metadata {
-            Some(v) => serde_wasm_bindgen::to_value(v).unwrap_or(JsValue::NULL),
+            Some(v) => json_to_js(v),
             None => JsValue::NULL,
         }
     }
@@ -51,11 +64,7 @@ impl VctrsDatabase {
 
     /// Add a vector with a unique string ID and optional metadata.
     pub fn add(&self, id: &str, vector: &[f32], metadata: JsValue) -> Result<(), JsValue> {
-        let meta = if metadata.is_null() || metadata.is_undefined() {
-            None
-        } else {
-            Some(serde_wasm_bindgen::from_value(metadata)?)
-        };
+        let meta = js_to_json(&metadata);
         self.inner
             .add(id, vector.to_vec(), meta)
             .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -63,11 +72,7 @@ impl VctrsDatabase {
 
     /// Insert or update a vector.
     pub fn upsert(&self, id: &str, vector: &[f32], metadata: JsValue) -> Result<(), JsValue> {
-        let meta = if metadata.is_null() || metadata.is_undefined() {
-            None
-        } else {
-            Some(serde_wasm_bindgen::from_value(metadata)?)
-        };
+        let meta = js_to_json(&metadata);
         self.inner
             .upsert(id, vector.to_vec(), meta)
             .map_err(|e| JsValue::from_str(&e.to_string()))

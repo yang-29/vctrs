@@ -12,38 +12,36 @@
     background: #fafafa; color: #1a1a1a;
     line-height: 1.5;
   }
-  h2 { margin: 0 0 16px; font-size: 1.2rem; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 900px; }
+  h2 { margin: 0 0 12px; font-size: 1.1rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 960px; }
   @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
   .card {
     background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
-    padding: 16px;
+    padding: 14px;
   }
-  label { display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 4px; color: #555; }
-  input, select, textarea {
-    width: 100%; padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 6px;
-    font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
+  label { display: block; font-size: 0.82rem; font-weight: 500; margin-bottom: 3px; color: #555; }
+  input, select {
+    width: 100%; padding: 7px 10px; border: 1px solid #d0d0d0; border-radius: 6px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.82rem;
     background: #fafafa;
   }
-  input:focus, select:focus, textarea:focus { outline: none; border-color: #7c4dff; }
-  textarea { resize: vertical; min-height: 60px; }
+  input:focus, select:focus { outline: none; border-color: #7c4dff; }
   button {
-    padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
-    font-size: 0.85rem; font-weight: 500; transition: background 0.15s;
+    padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 0.82rem; font-weight: 500; transition: background 0.15s;
   }
   .btn-primary { background: #7c4dff; color: #fff; }
   .btn-primary:hover { background: #651fff; }
-  .btn-primary:disabled { background: #ccc; cursor: default; }
-  .btn-secondary { background: #f0f0f0; color: #333; }
-  .btn-secondary:hover { background: #e0e0e0; }
+  .btn-secondary { background: #f0f0f0; color: #333; border: 1px solid #d0d0d0; }
+  .btn-secondary:hover { background: #e4e4e4; }
   .btn-danger { background: #ff5252; color: #fff; }
   .btn-danger:hover { background: #ff1744; }
-  .btn-row { display: flex; gap: 8px; margin-top: 10px; }
-  .status {
-    padding: 10px 14px; border-radius: 6px; font-size: 0.85rem;
-    font-family: 'JetBrains Mono', monospace; margin-top: 12px;
+  .btn-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .log {
+    padding: 8px 12px; border-radius: 6px; font-size: 0.8rem;
+    font-family: 'JetBrains Mono', monospace; margin-top: 10px;
     background: #f5f5f5; border: 1px solid #e0e0e0;
-    white-space: pre-wrap; max-height: 300px; overflow-y: auto;
+    white-space: pre-wrap; max-height: 200px; overflow-y: auto;
   }
   .tag {
     display: inline-block; padding: 2px 8px; border-radius: 4px;
@@ -52,12 +50,17 @@
   .tag-loading { background: #fff3e0; color: #e65100; }
   .tag-ready { background: #e8f5e9; color: #2e7d32; }
   .tag-error { background: #ffebee; color: #c62828; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }
-  th { text-align: left; padding: 6px 8px; border-bottom: 2px solid #e0e0e0; font-weight: 600; }
-  td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
-  tr:hover td { background: #fafafa; }
-  .empty { color: #999; font-style: italic; padding: 12px 0; text-align: center; }
-  .stats { font-size: 0.8rem; color: #777; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 6px; }
+  th { text-align: left; padding: 5px 8px; border-bottom: 2px solid #e0e0e0; font-weight: 600; }
+  td { padding: 5px 8px; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; }
+  tr:hover td { background: #f8f8ff; }
+  .empty { color: #999; font-style: italic; padding: 10px 0; text-align: center; }
+  .stats { font-size: 0.78rem; color: #777; margin-top: 6px; }
+  .hint { font-size: 0.78rem; color: #888; margin-top: 4px; line-height: 1.4; }
+  .suggested { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .suggested button { font-size: 0.75rem; padding: 4px 10px; }
+  .preset-desc { font-size: 0.78rem; color: #666; margin-top: 6px; line-height: 1.4; }
+  .vector-table { max-height: 260px; overflow-y: auto; }
 </style>
 </head>
 <body>
@@ -66,59 +69,62 @@
 <div id="app" style="display:none">
 
 <div class="grid">
-  <!-- Left column: Add / Manage -->
+  <!-- Left column -->
   <div>
     <div class="card">
-      <h2>Add Vector</h2>
+      <h2>Presets</h2>
+      <p class="hint" style="margin:0 0 8px">Load a dataset to explore vector search. Each preset uses 8-dimensional vectors encoding different properties.</p>
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="loadPreset('movies')">Movies (20)</button>
+        <button class="btn-secondary" onclick="loadPreset('cities')">World Cities (20)</button>
+        <button class="btn-secondary" onclick="loadPreset('foods')">Foods (20)</button>
+      </div>
+      <div id="preset-desc" class="preset-desc"></div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>Database <span id="db-info" style="font-weight:normal;font-size:0.82rem;color:#888"></span></h2>
+      <div class="vector-table" id="vector-list"><span class="empty">Load a preset or add vectors</span></div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>Add Custom Vector</h2>
       <label for="add-id">ID</label>
-      <input id="add-id" placeholder="e.g. doc1" />
-      <label for="add-vec" style="margin-top:8px">Vector (comma-separated)</label>
-      <input id="add-vec" placeholder="e.g. 0.1, 0.9, 0.3, 0.5" />
-      <label for="add-meta" style="margin-top:8px">Metadata (JSON, optional)</label>
-      <input id="add-meta" placeholder='e.g. {"category": "science"}' />
+      <input id="add-id" placeholder="e.g. my_item" />
+      <label for="add-vec" style="margin-top:6px">Vector (8 comma-separated floats)</label>
+      <input id="add-vec" placeholder="e.g. 0.9, 0.7, 0.3, 0.1, 0.5, 0.2, 0.8, 0.4" />
+      <label for="add-meta" style="margin-top:6px">Metadata (JSON, optional)</label>
+      <input id="add-meta" placeholder='e.g. {"genre": "comedy"}' />
       <div class="btn-row">
         <button class="btn-primary" onclick="addVector()">Add</button>
         <button class="btn-secondary" onclick="addRandom()">Add Random</button>
-        <button class="btn-secondary" onclick="addRandom10()">+10 Random</button>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:16px">
-      <h2>Database</h2>
-      <div id="db-info">Empty</div>
-      <div class="btn-row">
-        <button class="btn-secondary" onclick="loadPreset()">Load Preset (colors)</button>
         <button class="btn-danger" onclick="resetDb()">Reset</button>
       </div>
     </div>
-
-    <div class="card" style="margin-top:16px">
-      <h2>Vectors</h2>
-      <div id="vector-list"><span class="empty">No vectors added yet</span></div>
-    </div>
   </div>
 
-  <!-- Right column: Search -->
+  <!-- Right column -->
   <div>
     <div class="card">
       <h2>Search</h2>
       <label for="search-vec">Query Vector</label>
-      <input id="search-vec" placeholder="e.g. 0.1, 0.9, 0.3, 0.5" />
-      <label for="search-k" style="margin-top:8px">k (results)</label>
+      <input id="search-vec" placeholder="click a suggested search or enter 8 floats" />
+      <label for="search-k" style="margin-top:6px">k (results)</label>
       <input id="search-k" type="number" value="5" min="1" max="100" />
       <div class="btn-row">
         <button class="btn-primary" onclick="doSearch()">Search</button>
       </div>
+      <div id="suggested-searches"></div>
     </div>
 
-    <div class="card" style="margin-top:16px">
+    <div class="card" style="margin-top:12px">
       <h2>Results</h2>
-      <div id="results"><span class="empty">Run a search to see results</span></div>
+      <div id="results"><span class="empty">Load a preset and try a search</span></div>
     </div>
 
-    <div class="card" style="margin-top:16px">
+    <div class="card" style="margin-top:12px">
       <h2>Log</h2>
-      <div class="status" id="log"></div>
+      <div class="log" id="log"></div>
     </div>
   </div>
 </div>
@@ -128,19 +134,128 @@
 <script type="module">
 import init, { VctrsDatabase } from "https://unpkg.com/@yang-29/vctrs-wasm/vctrs_wasm.js";
 
-const DIM = 4;
+const DIM = 8;
 let db;
+const vectors = new Map();
+let randomCounter = 0;
 
 const logEl = document.getElementById("log");
 const log = (msg) => { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; };
 
+// ── Presets ─────────────────────────────────────────────────────────────
+// Each vector is 8 dimensions. The dimensions are thematic per preset
+// (explained in the description) to make search results intuitive.
+
+const PRESETS = {
+  movies: {
+    desc: `<b>Dimensions:</b> action, comedy, drama, scifi, romance, horror, animation, indie<br>Each value (0-1) represents how much a movie embodies that quality.`,
+    data: {
+      "the_matrix":       { vec: [0.8, 0.1, 0.3, 0.9, 0.1, 0.1, 0.0, 0.2], meta: { genre: "sci-fi", year: 1999 }},
+      "die_hard":         { vec: [0.9, 0.4, 0.2, 0.1, 0.1, 0.1, 0.0, 0.1], meta: { genre: "action", year: 1988 }},
+      "inception":        { vec: [0.7, 0.1, 0.5, 0.8, 0.2, 0.1, 0.0, 0.3], meta: { genre: "sci-fi", year: 2010 }},
+      "the_hangover":     { vec: [0.2, 0.9, 0.1, 0.0, 0.2, 0.0, 0.0, 0.1], meta: { genre: "comedy", year: 2009 }},
+      "superbad":         { vec: [0.1, 0.9, 0.2, 0.0, 0.3, 0.0, 0.0, 0.3], meta: { genre: "comedy", year: 2007 }},
+      "titanic":          { vec: [0.3, 0.0, 0.9, 0.0, 0.9, 0.0, 0.0, 0.1], meta: { genre: "drama", year: 1997 }},
+      "the_notebook":     { vec: [0.0, 0.1, 0.8, 0.0, 1.0, 0.0, 0.0, 0.2], meta: { genre: "romance", year: 2004 }},
+      "interstellar":     { vec: [0.5, 0.0, 0.7, 1.0, 0.3, 0.0, 0.0, 0.2], meta: { genre: "sci-fi", year: 2014 }},
+      "alien":            { vec: [0.6, 0.0, 0.3, 0.8, 0.0, 0.9, 0.0, 0.1], meta: { genre: "horror", year: 1979 }},
+      "the_shining":      { vec: [0.1, 0.0, 0.6, 0.0, 0.0, 1.0, 0.0, 0.2], meta: { genre: "horror", year: 1980 }},
+      "get_out":          { vec: [0.2, 0.2, 0.5, 0.1, 0.0, 0.8, 0.0, 0.5], meta: { genre: "horror", year: 2017 }},
+      "toy_story":        { vec: [0.3, 0.7, 0.4, 0.1, 0.1, 0.0, 1.0, 0.1], meta: { genre: "animation", year: 1995 }},
+      "spirited_away":    { vec: [0.2, 0.2, 0.6, 0.3, 0.1, 0.1, 1.0, 0.5], meta: { genre: "animation", year: 2001 }},
+      "spider_verse":     { vec: [0.7, 0.4, 0.3, 0.3, 0.1, 0.0, 1.0, 0.3], meta: { genre: "animation", year: 2018 }},
+      "moonlight":        { vec: [0.0, 0.0, 1.0, 0.0, 0.3, 0.0, 0.0, 0.9], meta: { genre: "drama", year: 2016 }},
+      "eternal_sunshine": { vec: [0.0, 0.3, 0.7, 0.3, 0.8, 0.0, 0.0, 0.7], meta: { genre: "drama", year: 2004 }},
+      "mad_max_fury":     { vec: [1.0, 0.2, 0.2, 0.4, 0.1, 0.1, 0.0, 0.3], meta: { genre: "action", year: 2015 }},
+      "john_wick":        { vec: [1.0, 0.1, 0.1, 0.0, 0.0, 0.2, 0.0, 0.1], meta: { genre: "action", year: 2014 }},
+      "bridesmaids":      { vec: [0.1, 0.9, 0.3, 0.0, 0.4, 0.0, 0.0, 0.2], meta: { genre: "comedy", year: 2011 }},
+      "blade_runner":     { vec: [0.5, 0.0, 0.6, 0.9, 0.2, 0.1, 0.0, 0.4], meta: { genre: "sci-fi", year: 1982 }},
+    },
+    searches: [
+      { label: "Pure action", vec: [1, 0, 0, 0, 0, 0, 0, 0], hint: "Finds the most action-heavy movies (Die Hard, John Wick, Mad Max)" },
+      { label: "Scary sci-fi", vec: [0.5, 0, 0.2, 0.9, 0, 0.8, 0, 0], hint: "Blends sci-fi and horror dimensions (Alien, The Matrix)" },
+      { label: "Romantic drama", vec: [0, 0, 0.8, 0, 1, 0, 0, 0.2], hint: "High drama + romance (The Notebook, Titanic, Eternal Sunshine)" },
+      { label: "Funny animated", vec: [0.2, 0.8, 0.2, 0, 0, 0, 1, 0], hint: "Comedy + animation (Toy Story, Spider-Verse)" },
+      { label: "Cerebral sci-fi", vec: [0.3, 0, 0.7, 1, 0.2, 0, 0, 0.5], hint: "Thoughtful sci-fi (Interstellar, Blade Runner, Inception)" },
+      { label: "Indie drama", vec: [0, 0, 0.9, 0, 0.2, 0, 0, 1], hint: "Indie + drama dimensions (Moonlight, Eternal Sunshine)" },
+    ]
+  },
+
+  cities: {
+    desc: `<b>Dimensions:</b> population, wealth, temperature, coastal, historic, tech_hub, tourism, nightlife<br>Each value (0-1) represents a relative city characteristic.`,
+    data: {
+      "tokyo":        { vec: [1.0, 0.9, 0.5, 0.7, 0.7, 0.9, 0.9, 0.8], meta: { country: "Japan", pop: "14M" }},
+      "new_york":     { vec: [0.9, 0.9, 0.4, 0.7, 0.6, 0.8, 0.9, 0.9], meta: { country: "USA", pop: "8M" }},
+      "paris":        { vec: [0.7, 0.8, 0.5, 0.0, 0.9, 0.6, 1.0, 0.9], meta: { country: "France", pop: "2M" }},
+      "london":       { vec: [0.8, 0.9, 0.4, 0.0, 0.9, 0.8, 0.9, 0.8], meta: { country: "UK", pop: "9M" }},
+      "dubai":        { vec: [0.5, 1.0, 0.9, 0.8, 0.2, 0.5, 0.9, 0.7], meta: { country: "UAE", pop: "3M" }},
+      "singapore":    { vec: [0.5, 0.9, 0.9, 0.8, 0.3, 0.9, 0.8, 0.6], meta: { country: "Singapore", pop: "6M" }},
+      "rio":          { vec: [0.6, 0.3, 0.8, 0.9, 0.4, 0.2, 0.8, 0.9], meta: { country: "Brazil", pop: "7M" }},
+      "mumbai":       { vec: [0.9, 0.3, 0.8, 0.8, 0.5, 0.6, 0.5, 0.5], meta: { country: "India", pop: "21M" }},
+      "san_francisco":{ vec: [0.3, 0.9, 0.5, 0.8, 0.3, 1.0, 0.7, 0.6], meta: { country: "USA", pop: "900K" }},
+      "rome":         { vec: [0.4, 0.6, 0.6, 0.2, 1.0, 0.3, 1.0, 0.7], meta: { country: "Italy", pop: "3M" }},
+      "bangkok":      { vec: [0.8, 0.3, 0.9, 0.1, 0.5, 0.3, 0.9, 0.9], meta: { country: "Thailand", pop: "11M" }},
+      "berlin":       { vec: [0.5, 0.7, 0.4, 0.0, 0.7, 0.7, 0.7, 1.0], meta: { country: "Germany", pop: "4M" }},
+      "sydney":       { vec: [0.4, 0.8, 0.6, 0.9, 0.3, 0.5, 0.8, 0.7], meta: { country: "Australia", pop: "5M" }},
+      "cairo":        { vec: [0.8, 0.2, 0.8, 0.1, 1.0, 0.1, 0.8, 0.3], meta: { country: "Egypt", pop: "10M" }},
+      "reykjavik":    { vec: [0.1, 0.7, 0.1, 0.7, 0.4, 0.2, 0.7, 0.4], meta: { country: "Iceland", pop: "130K" }},
+      "lagos":        { vec: [0.9, 0.1, 0.8, 0.8, 0.2, 0.3, 0.2, 0.5], meta: { country: "Nigeria", pop: "15M" }},
+      "amsterdam":    { vec: [0.3, 0.8, 0.4, 0.2, 0.7, 0.6, 0.8, 0.9], meta: { country: "Netherlands", pop: "900K" }},
+      "kyoto":        { vec: [0.2, 0.7, 0.5, 0.0, 1.0, 0.3, 0.9, 0.3], meta: { country: "Japan", pop: "1.5M" }},
+      "nairobi":      { vec: [0.5, 0.2, 0.6, 0.0, 0.3, 0.4, 0.4, 0.3], meta: { country: "Kenya", pop: "5M" }},
+      "lisbon":       { vec: [0.3, 0.5, 0.6, 0.8, 0.7, 0.5, 0.8, 0.7], meta: { country: "Portugal", pop: "500K" }},
+    },
+    searches: [
+      { label: "Rich tech hub", vec: [0.3, 1, 0.5, 0.5, 0.2, 1, 0.5, 0.5], hint: "Wealthy + tech-focused cities (San Francisco, Singapore, Tokyo)" },
+      { label: "Hot beach city", vec: [0.3, 0.5, 1, 1, 0.2, 0.2, 0.8, 0.8], hint: "Warm + coastal + fun (Rio, Dubai, Bangkok)" },
+      { label: "Historic + touristy", vec: [0.3, 0.5, 0.5, 0.2, 1, 0.2, 1, 0.5], hint: "Old cities with lots of tourists (Rome, Paris, Kyoto)" },
+      { label: "Big + cheap", vec: [1, 0.1, 0.7, 0.5, 0.3, 0.2, 0.3, 0.4], hint: "High population + low wealth (Lagos, Mumbai, Cairo)" },
+      { label: "Party capital", vec: [0.5, 0.6, 0.5, 0.3, 0.5, 0.4, 0.7, 1], hint: "Best nightlife (Berlin, New York, Bangkok)" },
+      { label: "Cold & small", vec: [0.1, 0.7, 0.1, 0.5, 0.5, 0.3, 0.6, 0.4], hint: "Small, cold, wealthy (Reykjavik, Amsterdam)" },
+    ]
+  },
+
+  foods: {
+    desc: `<b>Dimensions:</b> sweet, savory, spicy, healthy, filling, quick, comfort, exotic<br>Each value (0-1) represents how much a food has that quality.`,
+    data: {
+      "pizza":          { vec: [0.1, 0.9, 0.2, 0.2, 0.8, 0.6, 1.0, 0.1], meta: { origin: "Italy", type: "main" }},
+      "sushi":          { vec: [0.1, 0.8, 0.2, 0.8, 0.4, 0.3, 0.3, 0.7], meta: { origin: "Japan", type: "main" }},
+      "ice_cream":      { vec: [1.0, 0.0, 0.0, 0.1, 0.2, 0.8, 0.9, 0.1], meta: { origin: "various", type: "dessert" }},
+      "pad_thai":       { vec: [0.3, 0.7, 0.6, 0.4, 0.6, 0.5, 0.5, 0.7], meta: { origin: "Thailand", type: "main" }},
+      "chicken_tikka":  { vec: [0.1, 0.8, 0.9, 0.4, 0.7, 0.3, 0.7, 0.6], meta: { origin: "India", type: "main" }},
+      "caesar_salad":   { vec: [0.0, 0.6, 0.0, 0.9, 0.3, 0.5, 0.2, 0.1], meta: { origin: "Mexico", type: "side" }},
+      "burger":         { vec: [0.1, 0.9, 0.1, 0.1, 0.9, 0.7, 1.0, 0.0], meta: { origin: "USA", type: "main" }},
+      "chocolate_cake": { vec: [1.0, 0.1, 0.0, 0.0, 0.5, 0.3, 1.0, 0.1], meta: { origin: "various", type: "dessert" }},
+      "pho":            { vec: [0.1, 0.8, 0.4, 0.6, 0.8, 0.4, 0.8, 0.7], meta: { origin: "Vietnam", type: "main" }},
+      "tacos":          { vec: [0.1, 0.8, 0.6, 0.3, 0.5, 0.8, 0.7, 0.3], meta: { origin: "Mexico", type: "main" }},
+      "acai_bowl":      { vec: [0.7, 0.0, 0.0, 1.0, 0.4, 0.5, 0.3, 0.5], meta: { origin: "Brazil", type: "breakfast" }},
+      "ramen":          { vec: [0.1, 0.8, 0.3, 0.3, 0.9, 0.4, 0.9, 0.6], meta: { origin: "Japan", type: "main" }},
+      "croissant":      { vec: [0.5, 0.3, 0.0, 0.1, 0.3, 0.7, 0.7, 0.3], meta: { origin: "France", type: "breakfast" }},
+      "kimchi_stew":    { vec: [0.0, 0.7, 0.8, 0.5, 0.7, 0.3, 0.8, 0.7], meta: { origin: "Korea", type: "main" }},
+      "greek_yogurt":   { vec: [0.3, 0.2, 0.0, 1.0, 0.3, 0.9, 0.2, 0.2], meta: { origin: "Greece", type: "breakfast" }},
+      "biryani":        { vec: [0.1, 0.9, 0.7, 0.3, 0.9, 0.2, 0.7, 0.7], meta: { origin: "India", type: "main" }},
+      "mochi":          { vec: [0.9, 0.0, 0.0, 0.3, 0.2, 0.6, 0.5, 0.8], meta: { origin: "Japan", type: "dessert" }},
+      "falafel":        { vec: [0.0, 0.7, 0.3, 0.6, 0.5, 0.7, 0.5, 0.5], meta: { origin: "Middle East", type: "main" }},
+      "mac_and_cheese": { vec: [0.1, 0.8, 0.0, 0.1, 0.8, 0.5, 1.0, 0.0], meta: { origin: "USA", type: "main" }},
+      "ceviche":        { vec: [0.2, 0.7, 0.4, 0.7, 0.3, 0.3, 0.2, 0.8], meta: { origin: "Peru", type: "appetizer" }},
+    },
+    searches: [
+      { label: "Healthy & light", vec: [0.2, 0.3, 0, 1, 0.2, 0.7, 0.1, 0.3], hint: "Finds nutritious, light meals (Greek yogurt, Acai bowl, Caesar salad)" },
+      { label: "Spicy & filling", vec: [0, 0.8, 0.9, 0.3, 0.9, 0.3, 0.7, 0.6], hint: "Hot, hearty dishes (Biryani, Chicken tikka, Kimchi stew)" },
+      { label: "Sweet treat", vec: [1, 0, 0, 0.1, 0.2, 0.6, 0.8, 0.2], hint: "Desserts and sweets (Ice cream, Chocolate cake, Mochi)" },
+      { label: "Quick comfort", vec: [0.1, 0.8, 0.1, 0.1, 0.7, 0.8, 1, 0], hint: "Fast, comforting classics (Burger, Pizza, Mac and cheese)" },
+      { label: "Exotic adventure", vec: [0.2, 0.6, 0.5, 0.5, 0.4, 0.3, 0.4, 1], hint: "Unfamiliar, exciting foods (Ceviche, Mochi, Pad Thai)" },
+      { label: "Asian noodles", vec: [0.1, 0.8, 0.4, 0.4, 0.8, 0.4, 0.8, 0.7], hint: "Savory, filling, Asian noodle soups (Ramen, Pho, Pad Thai)" },
+    ]
+  }
+};
+
+// ── UI Helpers ──────────────────────────────────────────────────────────
+
 function updateInfo() {
-  document.getElementById("db-info").textContent = `${db.length} vectors, dim=${db.dim}`;
+  document.getElementById("db-info").textContent = `(${db.length} vectors, dim=${db.dim})`;
   updateVectorList();
 }
-
-// Track vectors for display
-const vectors = new Map();
 
 function updateVectorList() {
   const el = document.getElementById("vector-list");
@@ -148,14 +263,53 @@ function updateVectorList() {
     el.innerHTML = '<span class="empty">No vectors added yet</span>';
     return;
   }
-  let html = '<table><tr><th>ID</th><th>Vector</th><th></th></tr>';
+  let html = '<table><tr><th>ID</th><th>Metadata</th><th></th></tr>';
   for (const [id, v] of vectors) {
-    const short = `[${v.vec.slice(0, 4).map(x => x.toFixed(2)).join(", ")}${v.vec.length > 4 ? ", ..." : ""}]`;
-    html += `<tr><td>${id}</td><td>${short}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:0.75rem" onclick="deleteVec('${id}')">x</button></td></tr>`;
+    const metaStr = v.meta ? JSON.stringify(v.meta) : "";
+    html += `<tr><td>${id}</td><td>${metaStr}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:0.72rem" onclick="deleteVec('${id}')">x</button></td></tr>`;
   }
   html += '</table>';
   el.innerHTML = html;
 }
+
+function showSuggested(searches) {
+  const el = document.getElementById("suggested-searches");
+  if (!searches || searches.length === 0) {
+    el.innerHTML = '';
+    return;
+  }
+  let html = '<label style="margin-top:10px">Suggested searches</label><div class="suggested">';
+  for (let i = 0; i < searches.length; i++) {
+    html += `<button class="btn-secondary" onclick="useSuggested(${i})">${searches[i].label}</button>`;
+  }
+  html += '</div><div class="hint" id="search-hint"></div>';
+  el.innerHTML = html;
+}
+
+let currentSearches = [];
+
+window.useSuggested = function(i) {
+  const s = currentSearches[i];
+  document.getElementById("search-vec").value = s.vec.join(", ");
+  document.getElementById("search-hint").textContent = s.hint;
+  doSearch();
+};
+
+// ── Core Functions ─────────────────────────────────────────────────────
+
+window.loadPreset = function(name) {
+  resetDbInner();
+  const preset = PRESETS[name];
+  for (const [id, {vec, meta}] of Object.entries(preset.data)) {
+    db.add(id, new Float32Array(vec), meta);
+    vectors.set(id, { vec, meta });
+  }
+  log(`Loaded "${name}" preset (${Object.keys(preset.data).length} vectors)`);
+  document.getElementById("preset-desc").innerHTML = preset.desc;
+  currentSearches = preset.searches;
+  showSuggested(preset.searches);
+  updateInfo();
+};
 
 window.addVector = function() {
   const id = document.getElementById("add-id").value.trim();
@@ -176,7 +330,6 @@ window.addVector = function() {
   } catch (e) { log(`Error: ${e}`); }
 };
 
-let randomCounter = 0;
 window.addRandom = function() {
   const id = `rand_${randomCounter++}`;
   const vec = new Float32Array(DIM);
@@ -184,15 +337,9 @@ window.addRandom = function() {
   try {
     db.add(id, vec, { random: true });
     vectors.set(id, { vec: Array.from(vec), meta: { random: true } });
-    log(`Added "${id}" = [${Array.from(vec).map(x => x.toFixed(3)).join(", ")}]`);
+    log(`Added "${id}"`);
     updateInfo();
   } catch (e) { log(`Error: ${e}`); }
-};
-
-window.addRandom10 = function() {
-  const t = performance.now();
-  for (let i = 0; i < 10; i++) window.addRandom();
-  log(`(10 vectors in ${(performance.now() - t).toFixed(1)}ms)`);
 };
 
 window.deleteVec = function(id) {
@@ -219,44 +366,23 @@ window.doSearch = function() {
     if (results.length === 0) {
       el.innerHTML = '<span class="empty">No results</span>';
     } else {
-      let html = '<table><tr><th>Rank</th><th>ID</th><th>Distance</th><th>Metadata</th></tr>';
+      let html = '<table><tr><th>#</th><th>ID</th><th>Distance</th><th>Metadata</th></tr>';
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         const meta = r.metadata;
-        html += `<tr><td>${i + 1}</td><td>${r.id}</td><td>${r.distance.toFixed(6)}</td><td>${meta ? JSON.stringify(meta) : ""}</td></tr>`;
+        html += `<tr><td>${i + 1}</td><td>${r.id}</td><td>${r.distance.toFixed(4)}</td><td>${meta ? JSON.stringify(meta) : ""}</td></tr>`;
         r.free();
       }
       html += '</table>';
       html += `<div class="stats">${results.length} results in ${elapsed.toFixed(3)}ms</div>`;
       el.innerHTML = html;
     }
-    log(`Search completed: ${results.length} results in ${elapsed.toFixed(3)}ms`);
+    log(`Search: ${results.length} results in ${elapsed.toFixed(3)}ms`);
   } catch (e) { log(`Error: ${e}`); }
 };
 
-window.loadPreset = function() {
-  resetDbInner();
-  const colors = {
-    red:    [1, 0, 0, 0],
-    orange: [0.8, 0.5, 0, 0],
-    yellow: [0.7, 0.7, 0, 0],
-    green:  [0, 1, 0, 0],
-    blue:   [0, 0, 1, 0],
-    purple: [0.5, 0, 0.5, 0],
-    white:  [0.6, 0.6, 0.6, 0.6],
-    black:  [0.05, 0.05, 0.05, 0.05],
-  };
-  for (const [name, vec] of Object.entries(colors)) {
-    db.add(name, new Float32Array(vec), { type: "color" });
-    vectors.set(name, { vec, meta: { type: "color" } });
-  }
-  log("Loaded color preset (8 vectors)");
-  document.getElementById("search-vec").value = "0.9, 0.1, 0, 0";
-  updateInfo();
-};
-
 function resetDbInner() {
-  db.free();
+  if (db) db.free();
   db = new VctrsDatabase(DIM, "cosine");
   vectors.clear();
   randomCounter = 0;
@@ -264,19 +390,23 @@ function resetDbInner() {
 
 window.resetDb = function() {
   resetDbInner();
+  currentSearches = [];
+  showSuggested([]);
+  document.getElementById("preset-desc").innerHTML = "";
   log("Database reset");
   updateInfo();
-  document.getElementById("results").innerHTML = '<span class="empty">Run a search to see results</span>';
+  document.getElementById("results").innerHTML = '<span class="empty">Load a preset and try a search</span>';
 };
 
-// Init
+// ── Init ────────────────────────────────────────────────────────────────
+
 try {
   await init();
   db = new VctrsDatabase(DIM, "cosine");
   document.getElementById("status-tag").className = "tag tag-ready";
   document.getElementById("status-tag").textContent = "WASM Ready (220KB)";
   document.getElementById("app").style.display = "block";
-  log("vctrs WASM loaded successfully");
+  log("vctrs WASM loaded");
   updateInfo();
 } catch (e) {
   document.getElementById("status-tag").className = "tag tag-error";
