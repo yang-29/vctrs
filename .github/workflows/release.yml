@@ -3,12 +3,14 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  # Build wheels for Linux
+  # ── Python wheels ──────────────────────────────────────────────────────
+
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -41,7 +43,6 @@ jobs:
           name: wheels-linux-${{ matrix.platform.target }}
           path: dist
 
-  # Build wheels for macOS
   macos:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -73,7 +74,6 @@ jobs:
           name: wheels-macos-${{ matrix.platform.target }}
           path: dist
 
-  # Build wheels for Windows
   windows:
     runs-on: windows-latest
     steps:
@@ -96,7 +96,6 @@ jobs:
           name: wheels-windows-x64
           path: dist
 
-  # Build source distribution
   sdist:
     runs-on: ubuntu-latest
     steps:
@@ -111,26 +110,7 @@ jobs:
           name: wheels-sdist
           path: dist
 
-  # Build WASM package
-  wasm:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - name: Build WASM
-        run: |
-          wasm-pack build wasm --target web --out-dir pkg --scope yang-29
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wasm-pkg
-          path: wasm/pkg
-
-  # Publish to PyPI
-  publish:
+  publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: [linux, macos, windows, sdist]
@@ -149,7 +129,81 @@ jobs:
       - name: Publish to PyPI
         run: uv publish dist/*
 
-  # Publish WASM to npm
+  # ── Node.js native bindings ────────────────────────────────────────────
+
+  node-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - working-directory: node
+        run: npm install
+      - working-directory: node
+        run: npx napi build --platform --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: node/*.node
+
+  publish-npm:
+    name: Publish Node to npm
+    runs-on: ubuntu-latest
+    needs: [node-build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bindings-*
+          merge-multiple: true
+          path: node
+      - working-directory: node
+        run: npm install
+      - working-directory: node
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── WASM ───────────────────────────────────────────────────────────────
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build WASM
+        run: wasm-pack build wasm --target web --out-dir pkg --scope yang-29
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-pkg
+          path: wasm/pkg
+
   publish-wasm:
     name: Publish WASM to npm
     runs-on: ubuntu-latest
