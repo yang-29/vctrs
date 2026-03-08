@@ -10,9 +10,9 @@ Try vctrs in the browser. Everything below runs client-side via WebAssembly — 
 Pick a preset (Movies, Cities, or Foods) — each loads 20 items as 8-dimensional vectors where each dimension represents a quality. Click suggested searches to see how cosine similarity finds related items.
 
 ### Semantic Search (AI)
-Click **Semantic Search (AI)** to enable real natural-language search powered by a transformer model ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)) running entirely in your browser. The model (~25MB) is downloaded once and cached.
+Click **Semantic Search (AI)** to enable real natural-language search powered by [mdbr-leaf-ir](https://huggingface.co/MongoDB/mdbr-leaf-ir) — the #1 ranked retrieval model under 100M params on MTEB — running entirely in your browser. The model (~30MB) is downloaded once and cached.
 
-Load a preset (Sentences, Products, or Questions), then search with plain English — the model embeds your query into 384 dimensions and vctrs finds the closest matches.
+Load a preset (Sentences, Products, or Questions), then search with plain English — the model embeds your query into 768 dimensions and vctrs finds the closest matches.
 
 !!! note "Everything runs locally"
     Both the vctrs WASM binary (~220KB) and the transformer model run entirely in your browser. No data is sent to any server.

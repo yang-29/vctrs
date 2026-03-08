@@ -123,9 +123,9 @@
     <div class="card" id="panel-semantic-setup" style="display:none">
       <h2>Semantic Search</h2>
       <div class="semantic-note">
-        Uses <b>all-MiniLM-L6-v2</b> (384 dimensions) running entirely in your browser via WebAssembly. The model (~25MB) is downloaded once and cached.
+        Uses <b>mdbr-leaf-ir</b> by MongoDB Research (768 dimensions) — the #1 ranked retrieval model under 100M params on MTEB. Runs entirely in your browser via WebAssembly. The model (~30MB) is downloaded once and cached.
       </div>
-      <button class="btn-primary" id="btn-load-model" onclick="loadModel()">Load AI Model (~25MB)</button>
+      <button class="btn-primary" id="btn-load-model" onclick="loadModel()">Load AI Model (~30MB)</button>
       <div id="model-progress" style="display:none">
         <div class="hint" id="model-progress-text">Downloading model...</div>
         <div class="progress-bar"><div class="progress-bar-fill" id="model-progress-bar" style="width:0%"></div></div>
@@ -133,9 +133,11 @@
       <div id="semantic-presets" style="display:none;margin-top:12px">
         <label>Quick presets</label>
         <div class="btn-row">
-          <button class="btn-secondary" onclick="loadSemanticPreset('sentences')">Sentences (15)</button>
-          <button class="btn-secondary" onclick="loadSemanticPreset('products')">Products (15)</button>
-          <button class="btn-secondary" onclick="loadSemanticPreset('questions')">Questions (15)</button>
+          <button class="btn-secondary" onclick="loadSemanticPreset('knowledge')">Knowledge (40)</button>
+          <button class="btn-secondary" onclick="loadSemanticPreset('products')">Products (30)</button>
+          <button class="btn-secondary" onclick="loadSemanticPreset('questions')">FAQ (30)</button>
+          <button class="btn-secondary" onclick="loadSemanticPreset('movies')">Movie Plots (30)</button>
+          <button class="btn-secondary" onclick="loadSemanticPreset('recipes')">Recipes (30)</button>
         </div>
         <div id="semantic-preset-desc" class="preset-desc"></div>
       </div>
@@ -215,12 +217,13 @@ import init, { VctrsDatabase } from "https://unpkg.com/@yang-29/vctrs-wasm/vctrs
 
 let currentMode = "manual";
 const MANUAL_DIM = 8;
-const SEMANTIC_DIM = 384;
+const SEMANTIC_DIM = 768;
 let dim = MANUAL_DIM;
 let db;
 const vectors = new Map();
 let randomCounter = 0;
-let embedder = null;
+let aiTokenizer = null;
+let aiModel = null;
 
 const logEl = document.getElementById("log");
 const log = (msg) => { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; };
@@ -254,18 +257,29 @@ window.setMode = function(mode) {
 
 // ── AI Model ──────────────────────────────────────────────────────────
 
-async function embed(text) {
-  const output = await embedder(text, { pooling: "mean", normalize: true });
-  return output.tolist()[0];
+const QUERY_PREFIX = "Represent this sentence for searching relevant passages: ";
+
+async function embed(text, isQuery = true) {
+  const input = isQuery ? QUERY_PREFIX + text : text;
+  const inputs = await aiTokenizer([input], { padding: true });
+  const { sentence_embedding } = await aiModel(inputs);
+  return Array.from(sentence_embedding.data);
 }
 
-async function embedBatch(texts) {
-  const output = await embedder(texts, { pooling: "mean", normalize: true });
-  return output.tolist();
+async function embedBatch(texts, isQuery = false) {
+  const prefixed = texts.map(t => isQuery ? QUERY_PREFIX + t : t);
+  const inputs = await aiTokenizer(prefixed, { padding: true });
+  const { sentence_embedding } = await aiModel(inputs);
+  const dim = sentence_embedding.dims[1];
+  const results = [];
+  for (let i = 0; i < texts.length; i++) {
+    results.push(Array.from(sentence_embedding.data.slice(i * dim, (i + 1) * dim)));
+  }
+  return results;
 }
 
 window.loadModel = async function() {
-  if (embedder) return;
+  if (aiModel) return;
   const btn = document.getElementById("btn-load-model");
   btn.disabled = true;
   btn.textContent = "Loading...";
@@ -277,9 +291,13 @@ window.loadModel = async function() {
   aiTag.textContent = "AI Model: loading...";
 
   try {
-    const { pipeline } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1");
+    const { AutoModel, AutoTokenizer } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1");
 
-    embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+    const modelId = "onnx-community/mdbr-leaf-ir-ONNX";
+
+    aiTokenizer = await AutoTokenizer.from_pretrained(modelId);
+    aiModel = await AutoModel.from_pretrained(modelId, {
+      dtype: "q4f16",
       progress_callback: (data) => {
         if (data.status === "progress" && data.total) {
           const pct = Math.round(data.progress);
@@ -298,7 +316,7 @@ window.loadModel = async function() {
     btn.textContent = "Model loaded";
     document.getElementById("btn-add-text").disabled = false;
     document.getElementById("semantic-presets").style.display = "";
-    log("AI model loaded (all-MiniLM-L6-v2, 384 dims)");
+    log("AI model loaded (mdbr-leaf-ir, 768 dims, q4f16)");
   } catch (e) {
     aiTag.className = "tag tag-error";
     aiTag.textContent = "AI Model: error";
@@ -312,94 +330,245 @@ window.loadModel = async function() {
 // ── Semantic presets ──────────────────────────────────────────────────
 
 const SEMANTIC_PRESETS = {
-  sentences: {
-    desc: "Real sentences embedded with all-MiniLM-L6-v2. Search with natural language to find semantically similar text.",
+  knowledge: {
+    desc: "40 facts spanning science, history, geography, technology, and culture. Search with any topic to find related knowledge.",
     items: [
-      { id: "gravity", text: "Gravity pulls objects toward the center of the Earth" },
-      { id: "photosynthesis", text: "Plants convert sunlight into energy through photosynthesis" },
-      { id: "democracy", text: "Democracy is a system where citizens vote for their leaders" },
-      { id: "neural_nets", text: "Neural networks learn patterns from large amounts of training data" },
-      { id: "climate", text: "Climate change is caused by greenhouse gas emissions from burning fossil fuels" },
-      { id: "dna", text: "DNA contains the genetic instructions for building and maintaining living organisms" },
-      { id: "economics", text: "Supply and demand determine the prices of goods in a market economy" },
-      { id: "relativity", text: "Einstein showed that time moves slower near massive objects" },
-      { id: "evolution", text: "Species evolve over millions of years through natural selection" },
-      { id: "quantum", text: "Quantum particles can exist in multiple states simultaneously until observed" },
-      { id: "cooking", text: "The best way to cook a steak is to sear it on high heat for a crispy crust" },
-      { id: "sleep", text: "Getting eight hours of sleep each night is important for brain health" },
-      { id: "exercise", text: "Regular physical exercise reduces the risk of heart disease" },
-      { id: "music", text: "Mozart composed his first symphony when he was just eight years old" },
-      { id: "ocean", text: "The deepest point in the ocean is the Mariana Trench at 36,000 feet" },
+      { id: "gravity", text: "Gravity is the force that pulls objects toward each other, keeping planets in orbit around the sun" },
+      { id: "photosynthesis", text: "Plants convert sunlight, water, and carbon dioxide into glucose and oxygen through photosynthesis" },
+      { id: "democracy", text: "Democracy is a system of government where citizens vote to elect their leaders and representatives" },
+      { id: "neural_nets", text: "Neural networks are computing systems inspired by the brain that learn patterns from large datasets" },
+      { id: "climate", text: "Climate change is driven by greenhouse gas emissions from burning fossil fuels and deforestation" },
+      { id: "dna", text: "DNA is a double-helix molecule that carries the genetic instructions for all living organisms" },
+      { id: "economics", text: "Supply and demand determine prices in a market economy through the interaction of buyers and sellers" },
+      { id: "relativity", text: "Einstein's theory of relativity showed that time slows down near massive objects and at high speeds" },
+      { id: "evolution", text: "Species evolve over millions of years through natural selection, where beneficial traits are passed on" },
+      { id: "quantum", text: "In quantum mechanics, particles can exist in multiple states simultaneously until they are observed" },
+      { id: "sleep", text: "Getting seven to eight hours of sleep each night is critical for memory consolidation and brain health" },
+      { id: "exercise", text: "Regular cardiovascular exercise reduces the risk of heart disease, diabetes, and depression" },
+      { id: "ocean_depth", text: "The Mariana Trench is the deepest point in the ocean at nearly 36,000 feet below sea level" },
+      { id: "moon_landing", text: "Neil Armstrong became the first person to walk on the Moon during the Apollo 11 mission in 1969" },
+      { id: "printing_press", text: "Gutenberg's printing press in 1440 revolutionized communication by making books widely available" },
+      { id: "immune_system", text: "The immune system defends the body against bacteria, viruses, and other pathogens using white blood cells" },
+      { id: "black_holes", text: "Black holes are regions of spacetime where gravity is so strong that nothing, not even light, can escape" },
+      { id: "internet", text: "The internet was originally developed as ARPANET in 1969 to connect university research computers" },
+      { id: "pyramids", text: "The Great Pyramid of Giza was built around 2560 BC and is the oldest of the Seven Wonders of the Ancient World" },
+      { id: "antibiotics", text: "Alexander Fleming discovered penicillin in 1928, leading to the development of antibiotics that save millions of lives" },
+      { id: "plate_tectonics", text: "Earth's surface is divided into tectonic plates that slowly move, causing earthquakes and forming mountains" },
+      { id: "solar_system", text: "Our solar system has eight planets orbiting the Sun, with Jupiter being the largest by far" },
+      { id: "french_revolution", text: "The French Revolution began in 1789 and overthrew the monarchy, establishing principles of liberty and equality" },
+      { id: "electricity", text: "Electricity flows through conductors as electrons move from atom to atom in a circuit" },
+      { id: "vaccines", text: "Vaccines train the immune system to recognize and fight specific pathogens without causing the disease" },
+      { id: "renaissance", text: "The Renaissance was a cultural movement from the 14th to 17th century that revived art, science, and learning in Europe" },
+      { id: "water_cycle", text: "The water cycle moves water between oceans, atmosphere, and land through evaporation, condensation, and precipitation" },
+      { id: "great_wall", text: "The Great Wall of China stretches over 13,000 miles and was built over centuries to protect against invasions" },
+      { id: "blockchain", text: "Blockchain is a decentralized digital ledger that records transactions across many computers securely" },
+      { id: "coral_reefs", text: "Coral reefs support 25% of all marine species and are threatened by ocean warming and acidification" },
+      { id: "roman_empire", text: "The Roman Empire at its peak controlled most of Europe, North Africa, and the Middle East for over 500 years" },
+      { id: "machine_learning", text: "Machine learning algorithms improve automatically through experience without being explicitly programmed" },
+      { id: "human_genome", text: "The Human Genome Project completed in 2003 mapped all 20,000-25,000 genes in human DNA" },
+      { id: "volcanoes", text: "Volcanoes erupt when magma from deep within Earth's mantle rises to the surface through cracks in the crust" },
+      { id: "cold_war", text: "The Cold War was a geopolitical rivalry between the United States and Soviet Union lasting from 1947 to 1991" },
+      { id: "microbiome", text: "The human gut contains trillions of bacteria that help digest food, produce vitamins, and support immunity" },
+      { id: "dark_matter", text: "Dark matter makes up about 27% of the universe but cannot be directly observed because it does not emit light" },
+      { id: "silk_road", text: "The Silk Road was an ancient network of trade routes connecting China to the Mediterranean for over 1,500 years" },
+      { id: "crispr", text: "CRISPR-Cas9 is a gene editing tool that allows scientists to precisely modify DNA sequences in living organisms" },
+      { id: "rainforest", text: "The Amazon rainforest produces about 20% of the world's oxygen and is home to 10% of all known species" },
     ],
     searches: [
-      { label: "Physics", query: "laws of physics and motion", hint: "Should find gravity, relativity, quantum" },
-      { label: "Biology", query: "how do living things work", hint: "Should find DNA, evolution, photosynthesis" },
-      { label: "Health", query: "staying healthy and fit", hint: "Should find exercise, sleep" },
-      { label: "AI & ML", query: "artificial intelligence and machine learning", hint: "Should find neural networks" },
-      { label: "Environment", query: "pollution and the planet", hint: "Should find climate change" },
-      { label: "Food", query: "preparing delicious meals", hint: "Should find cooking" },
+      { label: "Physics", query: "fundamental forces and laws of the universe", hint: "Should find gravity, relativity, quantum, black holes" },
+      { label: "Biology", query: "how living organisms function and evolve", hint: "Should find DNA, evolution, photosynthesis, immune system" },
+      { label: "Ancient history", query: "ancient civilizations and monuments", hint: "Should find pyramids, Roman Empire, Great Wall, Silk Road" },
+      { label: "Medicine", query: "medical breakthroughs and treatments", hint: "Should find antibiotics, vaccines, CRISPR" },
+      { label: "Technology", query: "computers, internet, and digital innovation", hint: "Should find internet, blockchain, machine learning, neural nets" },
+      { label: "Earth science", query: "geological processes and natural phenomena", hint: "Should find plate tectonics, volcanoes, water cycle" },
+      { label: "Space", query: "astronomy and the cosmos", hint: "Should find black holes, dark matter, solar system, moon landing" },
+      { label: "Environment", query: "ecological threats and conservation", hint: "Should find climate, coral reefs, rainforest" },
     ]
   },
   products: {
-    desc: "Product descriptions embedded for semantic product search. Try searching by use case or feature.",
+    desc: "30 product descriptions for semantic product search. Try searching by use case, feature, or problem you want to solve.",
     items: [
-      { id: "macbook_pro", text: "MacBook Pro 16-inch laptop with M3 chip, great for video editing and programming" },
-      { id: "airpods_pro", text: "AirPods Pro wireless earbuds with active noise cancellation" },
-      { id: "kindle", text: "Amazon Kindle e-reader with paper-like display for reading books" },
-      { id: "standing_desk", text: "Adjustable standing desk for ergonomic home office setup" },
-      { id: "yoga_mat", text: "Non-slip yoga mat for home workouts and stretching exercises" },
-      { id: "espresso_machine", text: "Breville espresso machine for making barista-quality coffee at home" },
-      { id: "air_purifier", text: "HEPA air purifier that removes allergens dust and pet dander from indoor air" },
-      { id: "running_shoes", text: "Nike running shoes with cushioned sole for long-distance jogging" },
-      { id: "mechanical_kbd", text: "Mechanical keyboard with Cherry MX switches for fast and accurate typing" },
-      { id: "instant_pot", text: "Instant Pot pressure cooker for making soups stews and rice quickly" },
-      { id: "noise_cancel_hp", text: "Sony WH-1000XM5 over-ear headphones with world-class noise cancellation" },
-      { id: "smart_watch", text: "Apple Watch with heart rate monitor step tracking and GPS for fitness" },
-      { id: "monitor_4k", text: "LG 4K monitor with HDR support for graphic design and photo editing" },
-      { id: "blender", text: "Vitamix blender for making smoothies protein shakes and soups" },
-      { id: "camping_tent", text: "Lightweight two-person camping tent that is waterproof and easy to set up" },
+      { id: "macbook_pro", text: "MacBook Pro 16-inch laptop with M3 chip, ideal for video editing, programming, and creative work" },
+      { id: "airpods_pro", text: "AirPods Pro wireless earbuds with active noise cancellation and spatial audio" },
+      { id: "kindle", text: "Amazon Kindle Paperwhite e-reader with glare-free display for reading books anywhere" },
+      { id: "standing_desk", text: "Adjustable electric standing desk for ergonomic home office setup with memory presets" },
+      { id: "yoga_mat", text: "Non-slip yoga mat made from natural rubber for home workouts and stretching exercises" },
+      { id: "espresso_machine", text: "Breville Barista Express espresso machine with built-in grinder for cafe-quality coffee at home" },
+      { id: "air_purifier", text: "HEPA air purifier that removes 99.97% of allergens, dust, smoke, and pet dander from indoor air" },
+      { id: "running_shoes", text: "Nike ZoomX running shoes with carbon fiber plate and cushioned sole for marathon training" },
+      { id: "mechanical_kbd", text: "Mechanical keyboard with Cherry MX Brown switches, RGB backlighting, and programmable macros" },
+      { id: "instant_pot", text: "Instant Pot 8-quart pressure cooker for making soups, stews, rice, and yogurt quickly" },
+      { id: "noise_cancel_hp", text: "Sony WH-1000XM5 over-ear headphones with industry-leading noise cancellation and 30-hour battery" },
+      { id: "smart_watch", text: "Apple Watch Ultra with heart rate monitor, blood oxygen sensor, GPS, and dive computer" },
+      { id: "monitor_4k", text: "LG 32-inch 4K IPS monitor with HDR600 and 98% DCI-P3 for graphic design and photo editing" },
+      { id: "blender", text: "Vitamix professional blender for making smoothies, protein shakes, hot soups, and nut butters" },
+      { id: "camping_tent", text: "Lightweight two-person backpacking tent with waterproof rainfly and easy clip setup" },
+      { id: "robot_vacuum", text: "Roborock S8 robot vacuum and mop with LiDAR navigation and automatic dirt disposal" },
+      { id: "e_bike", text: "Rad Power RadRunner electric bike with 750W motor for commuting and cargo hauling" },
+      { id: "gaming_mouse", text: "Logitech G Pro X wireless gaming mouse with 25K sensor and 70-hour battery life" },
+      { id: "air_fryer", text: "Ninja dual-basket air fryer for crispy fries, chicken wings, and vegetables with less oil" },
+      { id: "projector", text: "BenQ 4K home theater projector with HDR and low input lag for movies and gaming" },
+      { id: "massage_gun", text: "Theragun Pro percussion massage gun for deep tissue muscle recovery after workouts" },
+      { id: "smart_thermostat", text: "Ecobee smart thermostat with room sensors that learns your schedule to save on energy bills" },
+      { id: "camera", text: "Sony A7 IV mirrorless full-frame camera with 33MP sensor for professional photography and video" },
+      { id: "backpack", text: "Peak Design Everyday Backpack with weatherproof design and customizable dividers for camera gear" },
+      { id: "sleep_tracker", text: "Oura Ring Gen 3 sleep and fitness tracker that monitors heart rate, temperature, and sleep stages" },
+      { id: "water_filter", text: "Berkey gravity-fed water filter that removes bacteria, viruses, and chemicals without electricity" },
+      { id: "electric_toothbrush", text: "Oral-B iO Series 9 electric toothbrush with AI-powered tracking and pressure sensor" },
+      { id: "portable_charger", text: "Anker 26800mAh portable power bank with USB-C fast charging for phones, tablets, and laptops" },
+      { id: "noise_machine", text: "Hatch Restore sound machine and sunrise alarm clock for better sleep with white noise and meditation" },
+      { id: "sous_vide", text: "Anova precision sous vide cooker for perfectly tender steaks, chicken, and vegetables every time" },
     ],
     searches: [
-      { label: "Work from home", query: "productive home office setup", hint: "Should find desk, keyboard, monitor" },
-      { label: "Music on the go", query: "listening to music while traveling", hint: "Should find AirPods, headphones" },
-      { label: "Fitness", query: "equipment for working out and exercise", hint: "Should find yoga mat, running shoes, watch" },
-      { label: "Kitchen", query: "cooking and making drinks at home", hint: "Should find espresso machine, blender, instant pot" },
-      { label: "Reading", query: "reading books comfortably", hint: "Should find Kindle" },
-      { label: "Outdoors", query: "outdoor adventure camping and hiking", hint: "Should find camping tent, running shoes" },
+      { label: "Work from home", query: "productive home office setup for remote work", hint: "Should find desk, keyboard, monitor, webcam" },
+      { label: "Music lover", query: "best audio experience for music", hint: "Should find AirPods, headphones, projector" },
+      { label: "Fitness", query: "workout and exercise recovery equipment", hint: "Should find running shoes, yoga mat, massage gun, smart watch" },
+      { label: "Home cooking", query: "kitchen appliances for cooking at home", hint: "Should find espresso machine, air fryer, instant pot, sous vide, blender" },
+      { label: "Better sleep", query: "improve sleep quality and wake up refreshed", hint: "Should find sleep tracker, noise machine" },
+      { label: "Photography", query: "camera equipment for professional photos", hint: "Should find camera, backpack, monitor" },
+      { label: "Outdoor adventure", query: "hiking, camping, and exploring nature", hint: "Should find tent, backpack, e-bike, water filter" },
+      { label: "Gaming", query: "competitive PC gaming accessories", hint: "Should find gaming mouse, mechanical keyboard, monitor, projector" },
     ]
   },
   questions: {
-    desc: "FAQ-style questions. Search with your own question to find the most similar one.",
+    desc: "30 customer support FAQ questions. Search with your own question in natural language to find the best match.",
     items: [
       { id: "q_return", text: "How do I return a product and get a refund?" },
       { id: "q_password", text: "I forgot my password, how do I reset it?" },
-      { id: "q_shipping", text: "How long does shipping take and can I track my order?" },
-      { id: "q_cancel", text: "Can I cancel my subscription at any time?" },
-      { id: "q_payment", text: "What payment methods do you accept?" },
-      { id: "q_discount", text: "Are there any discount codes or promotions available?" },
-      { id: "q_size", text: "How do I find the right size for clothing?" },
+      { id: "q_shipping", text: "How long does standard shipping take and can I track my order?" },
+      { id: "q_cancel_sub", text: "Can I cancel my subscription at any time without penalty?" },
+      { id: "q_payment", text: "What payment methods do you accept, including digital wallets?" },
+      { id: "q_discount", text: "Are there any active discount codes or promotional offers?" },
+      { id: "q_size", text: "How do I find the right size for clothing and shoes?" },
       { id: "q_warranty", text: "What does the warranty cover and how long does it last?" },
-      { id: "q_contact", text: "How can I contact customer support?" },
-      { id: "q_account", text: "How do I create an account on your website?" },
-      { id: "q_international", text: "Do you ship internationally and what are the customs fees?" },
-      { id: "q_gift", text: "Can I send a product as a gift to someone else?" },
+      { id: "q_contact", text: "How can I reach customer support by phone, email, or chat?" },
+      { id: "q_account", text: "How do I create a new account on your website?" },
+      { id: "q_international", text: "Do you ship internationally and what are the customs and duty fees?" },
+      { id: "q_gift", text: "Can I send a product as a gift with gift wrapping?" },
       { id: "q_bulk", text: "Do you offer bulk or wholesale pricing for large orders?" },
-      { id: "q_privacy", text: "How do you protect my personal data and privacy?" },
-      { id: "q_mobile", text: "Is there a mobile app available for iOS and Android?" },
+      { id: "q_privacy", text: "How do you protect my personal data and what is your privacy policy?" },
+      { id: "q_mobile_app", text: "Is there a mobile app available for iOS and Android?" },
+      { id: "q_exchange", text: "Can I exchange an item for a different size or color?" },
+      { id: "q_out_of_stock", text: "When will this out-of-stock item be available again?" },
+      { id: "q_loyalty", text: "Do you have a loyalty or rewards program for repeat customers?" },
+      { id: "q_free_shipping", text: "What is the minimum order amount for free shipping?" },
+      { id: "q_damaged", text: "I received a damaged or defective product, what should I do?" },
+      { id: "q_order_change", text: "Can I modify or cancel my order after it has been placed?" },
+      { id: "q_store_credit", text: "Can I use store credit or a gift card to pay for my order?" },
+      { id: "q_two_factor", text: "How do I enable two-factor authentication on my account?" },
+      { id: "q_price_match", text: "Do you offer price matching if I find a lower price elsewhere?" },
+      { id: "q_subscription_pause", text: "Can I pause my subscription instead of canceling it?" },
+      { id: "q_delivery_address", text: "Can I change the delivery address after placing my order?" },
+      { id: "q_student_discount", text: "Do you offer student or military discounts?" },
+      { id: "q_wishlist", text: "How do I save items to a wishlist for later?" },
+      { id: "q_review", text: "How can I leave a review for a product I purchased?" },
+      { id: "q_unsubscribe", text: "How do I unsubscribe from marketing emails and newsletters?" },
     ],
     searches: [
-      { label: "Money back", query: "I want my money back", hint: "Should find return/refund question" },
-      { label: "Login help", query: "I can't log into my account", hint: "Should find password reset question" },
-      { label: "Where's my order?", query: "my package hasn't arrived yet", hint: "Should find shipping/tracking question" },
-      { label: "Save money", query: "how can I get a cheaper price", hint: "Should find discount/promo and bulk pricing" },
-      { label: "Data safety", query: "is my information secure", hint: "Should find privacy question" },
-      { label: "Gift ideas", query: "buying something for a friend", hint: "Should find gift question" },
+      { label: "Money back", query: "I want my money back for something I bought", hint: "Should find return/refund and exchange questions" },
+      { label: "Can't log in", query: "I can't access my account", hint: "Should find password reset, two-factor auth" },
+      { label: "Late delivery", query: "my package hasn't arrived and it's been two weeks", hint: "Should find shipping/tracking, damaged product" },
+      { label: "Save money", query: "ways to get a better price or deal", hint: "Should find discount codes, student discount, loyalty program, price match" },
+      { label: "Account security", query: "keep my account and information safe", hint: "Should find privacy policy, two-factor auth" },
+      { label: "Gift for someone", query: "buying a present for a friend's birthday", hint: "Should find gift wrapping, gift card, wishlist" },
+      { label: "Change my order", query: "I need to update my order details", hint: "Should find order change, delivery address, cancel" },
+      { label: "Stop emails", query: "I'm getting too many promotional messages", hint: "Should find unsubscribe from emails" },
+    ]
+  },
+  movies: {
+    desc: "30 movie plot summaries. Search by theme, genre, or plot element to find similar films.",
+    items: [
+      { id: "inception", text: "A thief who steals corporate secrets through dream-sharing technology is given the task of planting an idea into a CEO's mind" },
+      { id: "matrix", text: "A computer hacker discovers that reality is a simulation created by machines and joins a rebellion to free humanity" },
+      { id: "titanic", text: "A young aristocrat falls in love with a poor artist aboard the ill-fated maiden voyage of the Titanic" },
+      { id: "interstellar", text: "Astronauts travel through a wormhole near Saturn in search of a new habitable planet for humanity" },
+      { id: "shawshank", text: "A banker wrongly convicted of murder befriends a fellow prisoner over decades as they find solace and redemption" },
+      { id: "dark_knight", text: "Batman faces the Joker, a criminal mastermind who wants to plunge Gotham City into anarchy and chaos" },
+      { id: "forrest_gump", text: "A kind-hearted man with low intelligence witnesses and influences several major historical events in America" },
+      { id: "pulp_fiction", text: "The lives of two hitmen, a boxer, a gangster, and his wife intertwine in four tales of violence and redemption" },
+      { id: "spirited_away", text: "A young girl trapped in a spirit world must work in a bathhouse for gods to free herself and her parents" },
+      { id: "jurassic_park", text: "A theme park filled with cloned dinosaurs descends into chaos when the prehistoric creatures break free" },
+      { id: "goodfellas", text: "A young man grows up in the mob and works his way through the ranks of organized crime in New York" },
+      { id: "up", text: "An elderly widower ties thousands of balloons to his house and flies to South America with a young scout" },
+      { id: "alien", text: "The crew of a commercial spaceship encounters a deadly extraterrestrial creature that hunts them one by one" },
+      { id: "fight_club", text: "An insomniac office worker and a soap salesman form an underground club where men fight for recreation" },
+      { id: "toy_story", text: "A cowboy doll is threatened by the arrival of a new spaceman toy who becomes his owner's favorite" },
+      { id: "parasite", text: "A poor family schemes to become employed by a wealthy family by posing as unrelated highly qualified individuals" },
+      { id: "godfather", text: "The aging patriarch of an organized crime dynasty transfers control of his empire to his reluctant youngest son" },
+      { id: "mad_max", text: "In a post-apocalyptic wasteland, a woman rebels against a tyrannical ruler with the help of a drifter" },
+      { id: "finding_nemo", text: "A clownfish father crosses the ocean to rescue his son who was captured by a scuba diver" },
+      { id: "silence_lambs", text: "A young FBI agent seeks the help of an imprisoned cannibalistic serial killer to catch another murderer" },
+      { id: "social_network", text: "The story of how Mark Zuckerberg created Facebook and the lawsuits that followed from former friends" },
+      { id: "wall_e", text: "A lonely waste-collecting robot on an abandoned Earth falls in love with a sleek reconnaissance robot" },
+      { id: "eternal_sunshine", text: "A couple undergoes a medical procedure to erase each other from their memories after a painful breakup" },
+      { id: "jaws", text: "A giant man-eating great white shark attacks beachgoers at a summer resort town, and three men set out to hunt it" },
+      { id: "coco", text: "A young boy who dreams of being a musician enters the Land of the Dead to find his great-great-grandfather" },
+      { id: "blade_runner", text: "A retired cop hunts down bioengineered beings called replicants who have escaped to Earth from off-world colonies" },
+      { id: "get_out", text: "A young Black man visits his white girlfriend's family estate and discovers a disturbing secret about the community" },
+      { id: "whiplash", text: "A young jazz drummer enrolls at a music conservatory where an abusive instructor pushes him to his limits" },
+      { id: "arrival", text: "A linguist is recruited by the military to communicate with extraterrestrials who have landed on Earth" },
+      { id: "grand_budapest", text: "A legendary concierge at a famous hotel and his young protege become entangled in the theft of a priceless painting" },
+    ],
+    searches: [
+      { label: "Space travel", query: "astronauts exploring outer space", hint: "Should find Interstellar, Arrival, Alien, Wall-E" },
+      { label: "Crime & mafia", query: "organized crime and gangsters", hint: "Should find Godfather, Goodfellas, Pulp Fiction" },
+      { label: "Love story", query: "romantic relationships and heartbreak", hint: "Should find Titanic, Eternal Sunshine, Wall-E" },
+      { label: "Kids adventure", query: "animated family adventure movie", hint: "Should find Finding Nemo, Up, Toy Story, Coco" },
+      { label: "Scary thriller", query: "terrifying horror and suspense", hint: "Should find Alien, Silence of the Lambs, Jaws, Get Out" },
+      { label: "Mind-bending", query: "reality, dreams, and perception", hint: "Should find Inception, Matrix, Eternal Sunshine" },
+      { label: "Social issues", query: "class inequality and social commentary", hint: "Should find Parasite, Get Out, Social Network" },
+      { label: "Music & art", query: "musicians and creative passion", hint: "Should find Whiplash, Coco" },
+    ]
+  },
+  recipes: {
+    desc: "30 recipe descriptions from around the world. Search by ingredient, cuisine, dietary preference, or cooking method.",
+    items: [
+      { id: "carbonara", text: "Classic Italian pasta with eggs, pecorino cheese, guanciale, and black pepper tossed with hot spaghetti" },
+      { id: "pad_thai", text: "Thai stir-fried rice noodles with shrimp, tofu, bean sprouts, peanuts, and tamarind sauce" },
+      { id: "chicken_tikka", text: "Indian chicken marinated in yogurt and spices, grilled in a tandoor and served with creamy tomato sauce" },
+      { id: "sushi_roll", text: "Japanese vinegared rice rolled with fresh raw fish, cucumber, and avocado inside nori seaweed" },
+      { id: "tacos_pastor", text: "Mexican tacos with marinated pork cooked on a vertical spit, topped with pineapple, cilantro, and onion" },
+      { id: "beef_bourguignon", text: "French beef stew slow-braised in red wine with carrots, onions, mushrooms, and fresh herbs" },
+      { id: "pho", text: "Vietnamese soup with rice noodles in aromatic beef bone broth, topped with herbs, lime, and bean sprouts" },
+      { id: "margherita_pizza", text: "Neapolitan pizza with San Marzano tomato sauce, fresh mozzarella, basil leaves baked in a wood-fired oven" },
+      { id: "bibimbap", text: "Korean rice bowl topped with sauteed vegetables, gochujang chili paste, a fried egg, and sliced beef" },
+      { id: "fish_and_chips", text: "British battered and deep-fried cod served with thick-cut chips, mushy peas, and tartar sauce" },
+      { id: "falafel_wrap", text: "Middle Eastern crispy fried chickpea balls wrapped in pita bread with tahini, pickled vegetables, and salad" },
+      { id: "ramen", text: "Japanese noodle soup with rich pork bone broth, chashu pork belly, soft-boiled egg, and nori" },
+      { id: "ceviche", text: "Peruvian fresh raw fish cured in citrus juices with onion, chili peppers, cilantro, and sweet potato" },
+      { id: "butter_chicken", text: "Indian tender chicken pieces in a rich, creamy tomato and butter sauce with warm spices and naan bread" },
+      { id: "risotto", text: "Italian creamy rice dish slowly cooked with broth, white wine, parmesan cheese, and wild mushrooms" },
+      { id: "dim_sum", text: "Cantonese small steamed dishes including dumplings, buns, and rolls served with tea for brunch" },
+      { id: "shakshuka", text: "North African eggs poached in spiced tomato and pepper sauce with cumin, paprika, and crusty bread" },
+      { id: "peking_duck", text: "Chinese roasted duck with crispy skin served with thin pancakes, scallions, and hoisin sauce" },
+      { id: "banana_bread", text: "Moist quick bread made with ripe bananas, butter, sugar, and walnuts, perfect for breakfast or snack" },
+      { id: "greek_salad", text: "Mediterranean salad with tomatoes, cucumbers, red onion, olives, and feta cheese dressed in olive oil" },
+      { id: "biryani", text: "Fragrant Indian rice dish layered with spiced meat, saffron, caramelized onions, and fresh herbs" },
+      { id: "croissant", text: "Flaky French pastry made with laminated butter dough, rolled and shaped into a crescent for breakfast" },
+      { id: "tom_yum", text: "Thai hot and sour soup with shrimp, lemongrass, galangal, kaffir lime leaves, and chili" },
+      { id: "churros", text: "Spanish fried dough pastry coated in cinnamon sugar and served with thick hot chocolate for dipping" },
+      { id: "poke_bowl", text: "Hawaiian bowl with cubed raw tuna, soy sauce, sesame oil, rice, avocado, and edamame" },
+      { id: "moussaka", text: "Greek layered casserole with eggplant, spiced ground lamb, and creamy bechamel sauce baked until golden" },
+      { id: "empanadas", text: "Latin American baked or fried pastry pockets filled with seasoned beef, onions, olives, and hard-boiled egg" },
+      { id: "miso_soup", text: "Japanese broth made from fermented soybean paste with tofu, seaweed, and scallions" },
+      { id: "tiramisu", text: "Italian no-bake dessert with layers of espresso-soaked ladyfingers, mascarpone cream, and cocoa powder" },
+      { id: "smoothie_bowl", text: "Thick blended acai berries, banana, and almond milk topped with granola, coconut, and fresh fruit" },
+    ],
+    searches: [
+      { label: "Spicy food", query: "hot and spicy dishes with chili", hint: "Should find chicken tikka, tom yum, bibimbap, shakshuka" },
+      { label: "Vegetarian", query: "meatless plant-based meals", hint: "Should find falafel, greek salad, shakshuka, smoothie bowl, risotto" },
+      { label: "Quick breakfast", query: "easy morning meal or brunch", hint: "Should find banana bread, croissant, smoothie bowl, dim sum" },
+      { label: "Japanese food", query: "traditional Japanese cuisine", hint: "Should find sushi, ramen, miso soup, poke bowl" },
+      { label: "Comfort food", query: "warm hearty comfort meal on a cold day", hint: "Should find beef bourguignon, ramen, pho, butter chicken" },
+      { label: "Dessert", query: "sweet treats and pastries", hint: "Should find tiramisu, churros, banana bread, croissant" },
+      { label: "Seafood", query: "fish and shellfish dishes", hint: "Should find ceviche, sushi, poke bowl, fish and chips, tom yum" },
+      { label: "Street food", query: "casual food from street vendors and stalls", hint: "Should find tacos, falafel, empanadas, churros, dim sum" },
     ]
   }
 };
 
 window.loadSemanticPreset = async function(name) {
-  if (!embedder) { log("Error: load the AI model first"); return; }
+  if (!aiModel) { log("Error: load the AI model first"); return; }
   const preset = SEMANTIC_PRESETS[name];
   resetDbInner();
 
@@ -631,7 +800,7 @@ window.addVector = function() {
 };
 
 window.addText = async function() {
-  if (!embedder) { log("Error: load the AI model first"); return; }
+  if (!aiModel) { log("Error: load the AI model first"); return; }
   const text = document.getElementById("add-text").value.trim();
   if (!text) { log("Error: text required"); return; }
   try {
@@ -675,7 +844,7 @@ window.doSearch = async function() {
 
   let vec;
   if (currentMode === "semantic") {
-    if (!embedder) { log("Error: load the AI model first"); return; }
+    if (!aiModel) { log("Error: load the AI model first"); return; }
     const text = document.getElementById("search-text").value.trim();
     if (!text) { log("Error: search query required"); return; }
     const btn = document.getElementById("btn-search");
