@@ -130,6 +130,7 @@ impl Storage {
     }
 
     /// Load graph + metadata with mmap'd vectors (instant vector access, zero-copy).
+    /// If a quantized vectors file (vectors.sq8) exists, loads it for faster HNSW search.
     pub fn load(&self) -> io::Result<(HnswIndex, Vec<MetaRecord>)> {
         // Memory-map vectors.
         let vec_file = File::open(&self.vectors_path)?;
@@ -137,7 +138,16 @@ impl Storage {
 
         // Read entire graph file at once for fast parsing.
         let graph_data = fs::read(&self.graph_path)?;
-        let (index, remaining) = HnswIndex::load_graph_mmap(&graph_data, vectors_mmap)?;
+        let (mut index, remaining) = HnswIndex::load_graph_mmap(&graph_data, vectors_mmap)?;
+
+        // Load quantized vectors for search if available.
+        if self.quantized_path.exists() {
+            let sq_data = fs::read(&self.quantized_path)?;
+            let mut cursor = &sq_data[..];
+            let quantizer = ScalarQuantizer::load(&mut cursor)?;
+            let quantized_vectors = cursor.to_vec();
+            index.load_quantized(quantizer, quantized_vectors);
+        }
 
         // Parse metadata section from remaining bytes.
         let mut cursor = remaining;
@@ -219,6 +229,35 @@ mod tests {
         assert_eq!(loaded_meta.len(), 2);
         assert_eq!(loaded_meta[0].string_id, "a");
 
+        let results = loaded_index.search(&[1.0, 0.0, 0.0], 1, 50);
+        assert_eq!(results[0].0, 0);
+    }
+
+    #[test]
+    fn test_quantized_search_after_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(dir.path(), 3);
+
+        let mut index = HnswIndex::new(3, Metric::Cosine, 16, 200);
+        index.insert(vec![1.0, 0.0, 0.0]);
+        index.insert(vec![0.0, 1.0, 0.0]);
+        index.insert(vec![0.0, 0.0, 1.0]);
+
+        let meta_records = vec![
+            MetaRecord { internal_id: 0, string_id: "a".to_string(), metadata: None },
+            MetaRecord { internal_id: 1, string_id: "b".to_string(), metadata: None },
+            MetaRecord { internal_id: 2, string_id: "c".to_string(), metadata: None },
+        ];
+
+        // Save with quantization enabled.
+        storage.save(&index, &meta_records, true).unwrap();
+        assert!(dir.path().join("vectors.sq8").exists());
+
+        // Load — should auto-enable quantized search.
+        let (loaded_index, _) = storage.load().unwrap();
+        assert!(loaded_index.has_quantized_search());
+
+        // Search should work with quantized vectors.
         let results = loaded_index.search(&[1.0, 0.0, 0.0], 1, 50);
         assert_eq!(results[0].0, 0);
     }

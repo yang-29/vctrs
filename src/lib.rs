@@ -86,7 +86,7 @@ impl PyDatabase {
         };
 
         let db = Database::open_or_create_with_config(path, dim, metric_enum, config)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(PyDatabase { inner: db })
     }
@@ -96,7 +96,7 @@ impl PyDatabase {
         let vec = vector.to_vec()?;
         let meta = metadata.map(pythonize_dict).transpose()?;
         self.inner.add(id, vec, meta)
-            .map_err(|e| PyValueError::new_err(e))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// Add or update a vector.
@@ -105,7 +105,7 @@ impl PyDatabase {
         let vec = vector.to_vec()?;
         let meta = metadata.map(pythonize_dict).transpose()?;
         self.inner.upsert(id, vec, meta)
-            .map_err(|e| PyValueError::new_err(e))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     #[pyo3(signature = (ids, vectors, metadatas = None))]
@@ -152,7 +152,7 @@ impl PyDatabase {
             .collect();
 
         self.inner.add_many(items)
-            .map_err(|e| PyValueError::new_err(e))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// Search for the k nearest neighbors.
@@ -170,7 +170,7 @@ impl PyDatabase {
         let filter = where_filter.map(parse_filter).transpose()?;
 
         let results = self.inner.search(&vec, k, ef_search, filter.as_ref())
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(results.into_iter()
             .map(|r| PySearchResult {
@@ -193,7 +193,7 @@ impl PyDatabase {
         let queries: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
 
         let results = self.inner.search_many(&queries, k, ef_search, None)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Ok(results
             .into_iter()
@@ -212,7 +212,7 @@ impl PyDatabase {
 
     fn get(&self, id: &str) -> PyResult<(Vec<f32>, Option<PyObject>)> {
         let (vector, meta) = self.inner.get(id)
-            .map_err(|e| PyValueError::new_err(e))?;
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         Python::with_gil(|py| {
             let py_meta = meta.map(|m| json_to_pyobject(py, &m));
@@ -221,7 +221,7 @@ impl PyDatabase {
     }
 
     fn delete(&self, id: &str) -> PyResult<bool> {
-        self.inner.delete(id).map_err(|e| PyValueError::new_err(e))
+        self.inner.delete(id).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     #[pyo3(signature = (id, vector = None, metadata = None))]
@@ -234,7 +234,7 @@ impl PyDatabase {
         let vec = vector.map(|v| v.to_vec()).transpose()?;
         let meta = metadata.map(|d| pythonize_dict(d).map(Some)).transpose()?;
         self.inner.update(id, vec, meta)
-            .map_err(|e| PyValueError::new_err(e))
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     fn __contains__(&self, id: &str) -> bool {
@@ -246,7 +246,63 @@ impl PyDatabase {
     }
 
     fn save(&self) -> PyResult<()> {
-        self.inner.save().map_err(|e| PyValueError::new_err(e))
+        self.inner.save().map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Rebuild the index with only live vectors, reclaiming deleted slots.
+    /// Call this after many deletes to reduce memory usage and disk size.
+    fn compact(&self) -> PyResult<()> {
+        self.inner.compact().map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Enable quantized search: uses SQ8 quantized vectors for faster HNSW traversal
+    /// with full-precision re-ranking. Automatically enabled when quantize=True is set.
+    fn enable_quantized_search(&self) {
+        self.inner.enable_quantized_search();
+    }
+
+    /// Disable quantized search.
+    fn disable_quantized_search(&self) {
+        self.inner.disable_quantized_search();
+    }
+
+    /// Whether quantized search is currently enabled.
+    #[getter]
+    fn quantized_search(&self) -> bool {
+        self.inner.has_quantized_search()
+    }
+
+    /// Number of deleted slots that haven't been reclaimed.
+    #[getter]
+    fn deleted_count(&self) -> usize {
+        self.inner.deleted_count()
+    }
+
+    /// Total allocated slots (active + deleted).
+    #[getter]
+    fn total_slots(&self) -> usize {
+        self.inner.total_slots()
+    }
+
+    /// Get graph-level statistics for diagnostics.
+    /// Returns a dict with keys: num_vectors, num_deleted, num_layers, avg_degree_layer0,
+    /// max_degree_layer0, min_degree_layer0, memory_vectors_bytes, memory_graph_bytes,
+    /// memory_quantized_bytes, uses_brute_force, uses_quantized_search.
+    fn stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let s = self.inner.stats();
+        let dict = pyo3::types::PyDict::new_bound(py);
+        dict.set_item("num_vectors", s.num_vectors)?;
+        dict.set_item("num_deleted", s.num_deleted)?;
+        dict.set_item("num_layers", s.num_layers)?;
+        dict.set_item("avg_degree_layer0", s.avg_degree_layer0)?;
+        dict.set_item("max_degree_layer0", s.max_degree_layer0)?;
+        dict.set_item("min_degree_layer0", s.min_degree_layer0)?;
+        dict.set_item("memory_vectors_bytes", s.memory_vectors_bytes)?;
+        dict.set_item("memory_graph_bytes", s.memory_graph_bytes)?;
+        dict.set_item("memory_quantized_bytes", s.memory_quantized_bytes)?;
+        dict.set_item("uses_brute_force", s.uses_brute_force)?;
+        dict.set_item("uses_quantized_search", s.uses_quantized_search)?;
+        Ok(dict.into())
     }
 
     /// Context manager: auto-save on exit.
@@ -260,7 +316,7 @@ impl PyDatabase {
         _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
         _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
     ) -> PyResult<bool> {
-        self.inner.save().map_err(|e| PyValueError::new_err(e))?;
+        self.inner.save().map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(false)
     }
 
@@ -310,6 +366,26 @@ fn parse_filter(dict: &Bound<'_, PyDict>) -> PyResult<Filter> {
                             .map(|item| py_to_json(&item))
                             .collect::<PyResult<_>>()?;
                         filters.push(Filter::In(key_str.clone(), vals));
+                    }
+                    "$gt" => {
+                        let n: f64 = op_val.extract()
+                            .map_err(|_| PyValueError::new_err("$gt value must be a number"))?;
+                        filters.push(Filter::Gt(key_str.clone(), n));
+                    }
+                    "$gte" => {
+                        let n: f64 = op_val.extract()
+                            .map_err(|_| PyValueError::new_err("$gte value must be a number"))?;
+                        filters.push(Filter::Gte(key_str.clone(), n));
+                    }
+                    "$lt" => {
+                        let n: f64 = op_val.extract()
+                            .map_err(|_| PyValueError::new_err("$lt value must be a number"))?;
+                        filters.push(Filter::Lt(key_str.clone(), n));
+                    }
+                    "$lte" => {
+                        let n: f64 = op_val.extract()
+                            .map_err(|_| PyValueError::new_err("$lte value must be a number"))?;
+                        filters.push(Filter::Lte(key_str.clone(), n));
                     }
                     _ => return Err(PyValueError::new_err(format!("unknown operator: {}", op))),
                 }

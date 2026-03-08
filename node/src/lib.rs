@@ -37,7 +37,7 @@ impl VctrsDatabase {
     ) -> Result<Self> {
         if dim.is_none() {
             let db = Database::open(&path)
-                .map_err(|e| Error::from_reason(e))?;
+                .map_err(|e| Error::from_reason(e.to_string()))?;
             return Ok(VctrsDatabase { inner: db });
         }
 
@@ -58,7 +58,7 @@ impl VctrsDatabase {
         };
 
         let db = Database::open_or_create_with_config(&path, dim as usize, m, config)
-            .map_err(|e| Error::from_reason(e))?;
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(VctrsDatabase { inner: db })
     }
@@ -67,7 +67,7 @@ impl VctrsDatabase {
     pub fn add(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> Result<()> {
         let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
         self.inner.add(&id, vec_f32, metadata)
-            .map_err(|e| Error::from_reason(e))
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Add or update a vector.
@@ -75,7 +75,7 @@ impl VctrsDatabase {
     pub fn upsert(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> Result<()> {
         let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
         self.inner.upsert(&id, vec_f32, metadata)
-            .map_err(|e| Error::from_reason(e))
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     #[napi]
@@ -100,7 +100,7 @@ impl VctrsDatabase {
             .collect();
 
         self.inner.add_many(items)
-            .map_err(|e| Error::from_reason(e))
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Search for k nearest neighbors.
@@ -119,7 +119,7 @@ impl VctrsDatabase {
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
 
         let results = self.inner.search(&vec_f32, k, ef, filter.as_ref())
-            .map_err(|e| Error::from_reason(e))?;
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(results.into_iter().map(|r| SearchResult {
             id: r.id,
@@ -129,12 +129,14 @@ impl VctrsDatabase {
     }
 
     /// Search multiple queries in parallel. Returns array of result arrays.
+    /// `whereFilter`: optional object like { field: "value" } or { field: { $ne: "value" } }
     #[napi]
     pub fn search_many(
         &self,
         vectors: Vec<Vec<f64>>,
         k: Option<u32>,
         ef_search: Option<u32>,
+        where_filter: Option<serde_json::Value>,
     ) -> Result<Vec<Vec<SearchResult>>> {
         let vecs_f32: Vec<Vec<f32>> = vectors
             .iter()
@@ -143,9 +145,10 @@ impl VctrsDatabase {
         let queries: Vec<&[f32]> = vecs_f32.iter().map(|v| v.as_slice()).collect();
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
+        let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
 
-        let results = self.inner.search_many(&queries, k, ef, None)
-            .map_err(|e| Error::from_reason(e))?;
+        let results = self.inner.search_many(&queries, k, ef, filter.as_ref())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(results
             .into_iter()
@@ -165,7 +168,7 @@ impl VctrsDatabase {
     #[napi]
     pub fn get(&self, id: String) -> Result<GetResult> {
         let (vector, metadata) = self.inner.get(&id)
-            .map_err(|e| Error::from_reason(e))?;
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(GetResult {
             vector: vector.iter().map(|&v| v as f64).collect(),
@@ -175,7 +178,7 @@ impl VctrsDatabase {
 
     #[napi]
     pub fn delete(&self, id: String) -> Result<bool> {
-        self.inner.delete(&id).map_err(|e| Error::from_reason(e))
+        self.inner.delete(&id).map_err(|e| Error::from_reason(e.to_string()))
     }
 
     #[napi]
@@ -188,7 +191,7 @@ impl VctrsDatabase {
         let vec = vector.map(|v| v.iter().map(|&x| x as f32).collect());
         let meta = metadata.map(Some);
         self.inner.update(&id, vec, meta)
-            .map_err(|e| Error::from_reason(e))
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     #[napi]
@@ -203,13 +206,70 @@ impl VctrsDatabase {
 
     #[napi]
     pub fn save(&self) -> Result<()> {
-        self.inner.save().map_err(|e| Error::from_reason(e))
+        self.inner.save().map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Close the database and save to disk.
     #[napi]
     pub fn close(&self) -> Result<()> {
-        self.inner.save().map_err(|e| Error::from_reason(e))
+        self.inner.save().map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Get graph-level statistics for diagnostics.
+    #[napi]
+    pub fn stats(&self) -> serde_json::Value {
+        let s = self.inner.stats();
+        serde_json::json!({
+            "numVectors": s.num_vectors,
+            "numDeleted": s.num_deleted,
+            "numLayers": s.num_layers,
+            "avgDegreeLayer0": s.avg_degree_layer0,
+            "maxDegreeLayer0": s.max_degree_layer0,
+            "minDegreeLayer0": s.min_degree_layer0,
+            "memoryVectorsBytes": s.memory_vectors_bytes,
+            "memoryGraphBytes": s.memory_graph_bytes,
+            "memoryQuantizedBytes": s.memory_quantized_bytes,
+            "usesBruteForce": s.uses_brute_force,
+            "usesQuantizedSearch": s.uses_quantized_search,
+        })
+    }
+
+    /// Rebuild the index with only live vectors, reclaiming deleted slots.
+    /// Call this after many deletes to reduce memory usage and disk size.
+    #[napi]
+    pub fn compact(&self) -> Result<()> {
+        self.inner.compact().map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Enable quantized search: uses SQ8 quantized vectors for faster HNSW traversal
+    /// with full-precision re-ranking.
+    #[napi]
+    pub fn enable_quantized_search(&self) {
+        self.inner.enable_quantized_search();
+    }
+
+    /// Disable quantized search.
+    #[napi]
+    pub fn disable_quantized_search(&self) {
+        self.inner.disable_quantized_search();
+    }
+
+    /// Whether quantized search is currently enabled.
+    #[napi(getter)]
+    pub fn quantized_search(&self) -> bool {
+        self.inner.has_quantized_search()
+    }
+
+    /// Number of deleted slots that haven't been reclaimed.
+    #[napi(getter)]
+    pub fn deleted_count(&self) -> u32 {
+        self.inner.deleted_count() as u32
+    }
+
+    /// Total allocated slots (active + deleted).
+    #[napi(getter)]
+    pub fn total_slots(&self) -> u32 {
+        self.inner.total_slots() as u32
     }
 
     #[napi(getter)]
@@ -248,6 +308,26 @@ fn parse_js_filter(value: &serde_json::Value) -> Result<Filter> {
                         let arr = op_val.as_array()
                             .ok_or_else(|| Error::from_reason("$in value must be an array"))?;
                         filters.push(Filter::In(key.clone(), arr.clone()));
+                    }
+                    "$gt" => {
+                        let n = op_val.as_f64()
+                            .ok_or_else(|| Error::from_reason("$gt value must be a number"))?;
+                        filters.push(Filter::Gt(key.clone(), n));
+                    }
+                    "$gte" => {
+                        let n = op_val.as_f64()
+                            .ok_or_else(|| Error::from_reason("$gte value must be a number"))?;
+                        filters.push(Filter::Gte(key.clone(), n));
+                    }
+                    "$lt" => {
+                        let n = op_val.as_f64()
+                            .ok_or_else(|| Error::from_reason("$lt value must be a number"))?;
+                        filters.push(Filter::Lt(key.clone(), n));
+                    }
+                    "$lte" => {
+                        let n = op_val.as_f64()
+                            .ok_or_else(|| Error::from_reason("$lte value must be a number"))?;
+                        filters.push(Filter::Lte(key.clone(), n));
                     }
                     _ => return Err(Error::from_reason(format!("unknown operator: {}", op))),
                 }
