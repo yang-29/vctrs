@@ -3,7 +3,6 @@
 use crate::distance::Metric;
 use crate::error::{VctrsError, Result};
 use crate::hnsw::{GraphStats, HnswIndex};
-use crate::quantize::ScalarQuantizer;
 use crate::storage::{MetaRecord, Storage};
 use crate::wal::{Wal, WalEntry};
 use parking_lot::{Mutex, RwLock};
@@ -128,7 +127,6 @@ pub struct Database {
     meta_index: RwLock<MetadataIndex>,
     storage: Storage,
     dim: usize,
-    quantizer: RwLock<Option<ScalarQuantizer>>,
     quantize_on_save: bool,
     wal: Mutex<Wal>,
 }
@@ -279,7 +277,6 @@ impl Database {
                 meta_index: RwLock::new(mi),
                 storage,
                 dim,
-                quantizer: RwLock::new(None),
                 quantize_on_save: has_quantized,
                 wal: Mutex::new(wal),
             };
@@ -341,7 +338,6 @@ impl Database {
                 meta_index: RwLock::new(mi),
                 storage,
                 dim: loaded_dim,
-                quantizer: RwLock::new(None),
                 quantize_on_save: config.quantize || has_quantized,
                 wal: Mutex::new(wal),
             };
@@ -361,7 +357,6 @@ impl Database {
             meta_index: RwLock::new(MetadataIndex::new()),
             storage,
             dim,
-            quantizer: RwLock::new(None),
             quantize_on_save: config.quantize,
             wal: Mutex::new(wal),
         })
@@ -476,7 +471,7 @@ impl Database {
         &self,
         items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
     ) -> Result<()> {
-        for (id, vector, _) in &items {
+        for (_id, vector, _) in &items {
             if vector.len() != self.dim {
                 return Err(VctrsError::DimensionMismatch { expected: self.dim, got: vector.len() });
             }

@@ -456,7 +456,7 @@
             index.mark_deleted(i as u32);
         }
 
-        let (compacted, old_to_new) = index.compact();
+        let (compacted, _old_to_new) = index.compact();
         let live_vecs: Vec<Vec<f32>> = (n / 2..n).map(|i| vecs[i].clone()).collect();
 
         assert_eq!(compacted.len(), n / 2);

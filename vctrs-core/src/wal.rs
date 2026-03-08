@@ -14,8 +14,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-const WAL_MAGIC: u32 = 0x57414C31; // "WAL1"
-
 #[derive(Debug, Clone)]
 pub enum WalEntry {
     Add {

@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::io::{self, Read as IoRead, Write as IoWrite};
+use std::io::{self, Write as IoWrite};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};

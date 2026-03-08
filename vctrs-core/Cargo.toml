@@ -17,5 +17,8 @@ simsimd = "6"
 rayon = "1"
 memmap2 = "0.9"
 
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(has_blas)'] }
+
 [dev-dependencies]
 tempfile = "3"
