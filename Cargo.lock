@@ -825,7 +825,7 @@ checksum = "7264e107f553ccae879d21fbea1d6724ac785e8c3bfc762137959b5802826ef3"
 
 [[package]]
 name = "vctrs"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "numpy",
  "pyo3",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "vctrs-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "byteorder",
  "memmap2",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "vctrs-wasm"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "getrandom 0.2.17",
  "js-sys",

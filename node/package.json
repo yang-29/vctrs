@@ -1,6 +1,6 @@
 {
   "name": "@yang-29/vctrs",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "A fast embedded vector database. Rust core, Node.js API.",
   "main": "index.js",
   "types": "index.d.ts",
