@@ -5,8 +5,10 @@ use crate::error::{VctrsError, Result};
 use crate::hnsw::{GraphStats, HnswIndex};
 use crate::quantize::ScalarQuantizer;
 use crate::storage::{MetaRecord, Storage};
-use parking_lot::RwLock;
-use std::collections::HashMap;
+use crate::wal::{Wal, WalEntry};
+use parking_lot::{Mutex, RwLock};
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Database configuration options.
@@ -31,15 +33,104 @@ impl Default for HnswConfig {
     }
 }
 
+/// Inverted index over metadata fields for fast filtered search.
+/// Maps field_name → value → set of internal IDs that have that field=value.
+/// Only indexes top-level scalar fields (strings, numbers, bools).
+struct MetadataIndex {
+    /// field_name → value → set of internal IDs.
+    fields: HashMap<String, HashMap<serde_json::Value, HashSet<u32>>>,
+}
+
+impl MetadataIndex {
+    fn new() -> Self {
+        MetadataIndex { fields: HashMap::new() }
+    }
+
+    /// Index all scalar fields from a metadata object for a given internal ID.
+    fn index(&mut self, id: u32, metadata: &Option<serde_json::Value>) {
+        let obj = match metadata {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => return,
+        };
+        for (key, val) in obj {
+            // Only index scalar values (string, number, bool). Skip null, arrays, objects.
+            if val.is_null() || val.is_array() || val.is_object() {
+                continue;
+            }
+            self.fields
+                .entry(key.clone())
+                .or_default()
+                .entry(val.clone())
+                .or_default()
+                .insert(id);
+        }
+    }
+
+    /// Remove all entries for a given internal ID.
+    fn remove(&mut self, id: u32, metadata: &Option<serde_json::Value>) {
+        let obj = match metadata {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => return,
+        };
+        for (key, val) in obj {
+            if val.is_null() || val.is_array() || val.is_object() {
+                continue;
+            }
+            if let Some(value_map) = self.fields.get_mut(key) {
+                if let Some(id_set) = value_map.get_mut(val) {
+                    id_set.remove(&id);
+                    if id_set.is_empty() {
+                        value_map.remove(val);
+                    }
+                }
+                if value_map.is_empty() {
+                    self.fields.remove(key);
+                }
+            }
+        }
+    }
+
+    /// Get the set of IDs matching an $eq filter. Returns None if the field isn't indexed.
+    fn get_eq(&self, field: &str, value: &serde_json::Value) -> Option<&HashSet<u32>> {
+        self.fields.get(field)?.get(value)
+    }
+
+    /// Get the union of ID sets matching an $in filter.
+    fn get_in(&self, field: &str, values: &[serde_json::Value]) -> Option<HashSet<u32>> {
+        let value_map = self.fields.get(field)?;
+        let mut result = HashSet::new();
+        for val in values {
+            if let Some(ids) = value_map.get(val) {
+                result.extend(ids);
+            }
+        }
+        Some(result)
+    }
+
+    /// Rebuild the entire index from scratch.
+    fn rebuild(&mut self, metadata: &[Option<serde_json::Value>], deleted: &HashSet<u32>) {
+        self.fields.clear();
+        for (i, meta) in metadata.iter().enumerate() {
+            let id = i as u32;
+            if deleted.contains(&id) {
+                continue;
+            }
+            self.index(id, meta);
+        }
+    }
+}
+
 pub struct Database {
     index: RwLock<HnswIndex>,
     id_map: RwLock<HashMap<String, u32>>,
     reverse_map: RwLock<Vec<String>>,
     metadata: RwLock<Vec<Option<serde_json::Value>>>,
+    meta_index: RwLock<MetadataIndex>,
     storage: Storage,
     dim: usize,
     quantizer: RwLock<Option<ScalarQuantizer>>,
     quantize_on_save: bool,
+    wal: Mutex<Wal>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +172,48 @@ fn as_f64(v: &serde_json::Value) -> Option<f64> {
 }
 
 impl Filter {
+    /// Try to resolve this filter to a set of matching internal IDs using the inverted index.
+    /// Returns Some(set) for $eq and $in filters. Returns None for operators that
+    /// require per-candidate evaluation ($ne, $gt, $lt, etc.).
+    fn resolve_from_index(&self, meta_index: &MetadataIndex) -> Option<HashSet<u32>> {
+        match self {
+            Filter::Eq(key, val) => {
+                Some(meta_index.get_eq(key, val).cloned().unwrap_or_default())
+            }
+            Filter::In(key, vals) => {
+                Some(meta_index.get_in(key, vals).unwrap_or_default())
+            }
+            Filter::And(filters) => {
+                // If ALL sub-filters can be resolved, intersect their results.
+                // If any can't, return None (fall back to per-candidate).
+                let mut result: Option<HashSet<u32>> = None;
+                let mut has_unresolvable = false;
+                for f in filters {
+                    if let Some(ids) = f.resolve_from_index(meta_index) {
+                        result = Some(match result {
+                            Some(existing) => existing.intersection(&ids).copied().collect(),
+                            None => ids,
+                        });
+                    } else {
+                        has_unresolvable = true;
+                    }
+                }
+                // If we resolved at least one sub-filter, return that (even if some
+                // sub-filters are unresolvable — we'll still scan those but over a
+                // smaller candidate set).
+                if result.is_some() {
+                    result
+                } else if has_unresolvable {
+                    None
+                } else {
+                    Some(HashSet::new())
+                }
+            }
+            // $ne, $gt, $gte, $lt, $lte, $or cannot be efficiently resolved from an eq-index.
+            _ => None,
+        }
+    }
+
     pub fn matches(&self, metadata: &Option<serde_json::Value>) -> bool {
         let obj = match metadata {
             Some(serde_json::Value::Object(m)) => m,
@@ -132,16 +265,29 @@ impl Database {
                 metadata[rec.internal_id as usize] = rec.metadata;
             }
 
-            return Ok(Database {
+            let mut mi = MetadataIndex::new();
+            let deleted = index.deleted_ids().clone();
+            mi.rebuild(&metadata, &deleted);
+
+            let wal = Wal::new(&db_path);
+
+            let mut db = Database {
                 index: RwLock::new(index),
                 id_map: RwLock::new(id_map),
                 reverse_map: RwLock::new(reverse_map),
                 metadata: RwLock::new(metadata),
+                meta_index: RwLock::new(mi),
                 storage,
                 dim,
                 quantizer: RwLock::new(None),
                 quantize_on_save: has_quantized,
-            });
+                wal: Mutex::new(wal),
+            };
+
+            // Replay WAL entries on top of the snapshot.
+            db.replay_wal()?;
+
+            return Ok(db);
         }
 
         Err(VctrsError::DatabaseNotFound(path.to_string()))
@@ -181,27 +327,43 @@ impl Database {
                 metadata[rec.internal_id as usize] = rec.metadata;
             }
 
-            return Ok(Database {
+            let mut mi = MetadataIndex::new();
+            let deleted = index.deleted_ids().clone();
+            mi.rebuild(&metadata, &deleted);
+
+            let wal = Wal::new(&db_path);
+
+            let mut db = Database {
                 index: RwLock::new(index),
                 id_map: RwLock::new(id_map),
                 reverse_map: RwLock::new(reverse_map),
                 metadata: RwLock::new(metadata),
+                meta_index: RwLock::new(mi),
                 storage,
                 dim: loaded_dim,
                 quantizer: RwLock::new(None),
                 quantize_on_save: config.quantize || has_quantized,
-            });
+                wal: Mutex::new(wal),
+            };
+
+            db.replay_wal()?;
+
+            return Ok(db);
         }
+
+        let wal = Wal::new(&db_path);
 
         Ok(Database {
             index: RwLock::new(HnswIndex::new(dim, metric, config.m, config.ef_construction)),
             id_map: RwLock::new(HashMap::new()),
             reverse_map: RwLock::new(Vec::new()),
             metadata: RwLock::new(Vec::new()),
+            meta_index: RwLock::new(MetadataIndex::new()),
             storage,
             dim,
             quantizer: RwLock::new(None),
             quantize_on_save: config.quantize,
+            wal: Mutex::new(wal),
         })
     }
 
@@ -215,16 +377,34 @@ impl Database {
             return Err(VctrsError::DimensionMismatch { expected: self.dim, got: vector.len() });
         }
 
+        // Quick duplicate check with read lock (fast path for non-conflicting adds).
+        if self.id_map.read().contains_key(id) {
+            return Err(VctrsError::DuplicateId(id.to_string()));
+        }
+
+        // Write WAL entry before mutating in-memory state (outside id_map lock).
+        self.wal.lock().append(&WalEntry::Add {
+            id: id.to_string(),
+            vector: vector.clone(),
+            metadata: metadata.clone(),
+        })?;
+
+        // Acquire write locks for mutation.
         let mut id_map = self.id_map.write();
+        // Double-check after acquiring write lock.
         if id_map.contains_key(id) {
             return Err(VctrsError::DuplicateId(id.to_string()));
         }
 
         let mut index = self.index.write();
         let internal_id = index.insert(vector);
+        drop(index); // Release index write lock as soon as possible.
 
         id_map.insert(id.to_string(), internal_id);
+        drop(id_map); // Release id_map write lock.
+
         self.reverse_map.write().push(id.to_string());
+        self.meta_index.write().index(internal_id, &metadata);
         self.metadata.write().push(metadata);
 
         Ok(())
@@ -241,29 +421,49 @@ impl Database {
             return Err(VctrsError::DimensionMismatch { expected: self.dim, got: vector.len() });
         }
 
-        let id_map = self.id_map.read();
-        if let Some(&internal_id) = id_map.get(id) {
-            drop(id_map);
-            self.index.write().update_vector(internal_id, vector);
-            self.metadata.write()[internal_id as usize] = metadata;
-            return Ok(());
-        }
-        drop(id_map);
+        // WAL: upsert is logged as an Add (replay handles dedup via upsert logic).
+        self.wal.lock().append(&WalEntry::Add {
+            id: id.to_string(),
+            vector: vector.clone(),
+            metadata: metadata.clone(),
+        })?;
 
-        // Not found — insert.
+        // Fast path: check with read lock first.
+        {
+            let id_map = self.id_map.read();
+            if let Some(&internal_id) = id_map.get(id) {
+                drop(id_map);
+                self.index.write().update_vector(internal_id, vector);
+                let mut meta_store = self.metadata.write();
+                let mut mi = self.meta_index.write();
+                mi.remove(internal_id, &meta_store[internal_id as usize]);
+                mi.index(internal_id, &metadata);
+                meta_store[internal_id as usize] = metadata;
+                return Ok(());
+            }
+        }
+
+        // Not found — insert with write lock.
         let mut id_map = self.id_map.write();
         // Double-check after acquiring write lock.
         if let Some(&internal_id) = id_map.get(id) {
+            drop(id_map);
             self.index.write().update_vector(internal_id, vector);
-            self.metadata.write()[internal_id as usize] = metadata;
+            let mut meta_store = self.metadata.write();
+            let mut mi = self.meta_index.write();
+            mi.remove(internal_id, &meta_store[internal_id as usize]);
+            mi.index(internal_id, &metadata);
+            meta_store[internal_id as usize] = metadata;
             return Ok(());
         }
 
-        let mut index = self.index.write();
-        let internal_id = index.insert(vector);
+        let internal_id = self.index.write().insert(vector);
 
         id_map.insert(id.to_string(), internal_id);
+        drop(id_map);
+
         self.reverse_map.write().push(id.to_string());
+        self.meta_index.write().index(internal_id, &metadata);
         self.metadata.write().push(metadata);
 
         Ok(())
@@ -287,6 +487,18 @@ impl Database {
             }
         }
 
+        // Write WAL entries for each item before mutating in-memory state.
+        {
+            let mut wal = self.wal.lock();
+            for (id, vector, metadata) in &items {
+                wal.append(&WalEntry::Add {
+                    id: id.clone(),
+                    vector: vector.clone(),
+                    metadata: metadata.clone(),
+                })?;
+            }
+        }
+
         let (ids_vec, vecs, metas): (Vec<_>, Vec<_>, Vec<_>) = items
             .into_iter()
             .map(|(id, vec, meta)| (id, vec, meta))
@@ -305,6 +517,7 @@ impl Database {
 
         let mut reverse_map = self.reverse_map.write();
         let mut metadata = self.metadata.write();
+        let mut mi = self.meta_index.write();
 
         for (i, id) in ids_vec.into_iter().enumerate() {
             id_map.insert(id.clone(), internal_ids[i]);
@@ -315,6 +528,7 @@ impl Database {
             while metadata.len() <= internal_ids[i] as usize {
                 metadata.push(None);
             }
+            mi.index(internal_ids[i], &metas[i]);
             metadata[internal_ids[i] as usize] = metas[i].clone();
         }
 
@@ -322,17 +536,23 @@ impl Database {
     }
 
     pub fn delete(&self, id: &str) -> Result<bool> {
-        let mut id_map = self.id_map.write();
-        let internal_id = match id_map.remove(id) {
-            Some(iid) => iid,
-            None => return Ok(false),
-        };
+        let internal_id = {
+            let mut id_map = self.id_map.write();
+            match id_map.remove(id) {
+                Some(iid) => iid,
+                None => return Ok(false),
+            }
+        }; // id_map write lock released here.
 
-        let mut index = self.index.write();
-        index.mark_deleted(internal_id);
+        self.wal.lock().append(&WalEntry::Delete {
+            id: id.to_string(),
+        })?;
 
+        self.index.write().mark_deleted(internal_id);
         self.reverse_map.write()[internal_id as usize] = String::new();
-        self.metadata.write()[internal_id as usize] = None;
+        let mut meta_store = self.metadata.write();
+        self.meta_index.write().remove(internal_id, &meta_store[internal_id as usize]);
+        meta_store[internal_id as usize] = None;
 
         Ok(true)
     }
@@ -343,20 +563,35 @@ impl Database {
         vector: Option<Vec<f32>>,
         metadata: Option<Option<serde_json::Value>>,
     ) -> Result<()> {
-        let id_map = self.id_map.read();
-        let internal_id = *id_map
-            .get(id)
-            .ok_or_else(|| VctrsError::NotFound(id.to_string()))?;
+        let internal_id = {
+            let id_map = self.id_map.read();
+            *id_map
+                .get(id)
+                .ok_or_else(|| VctrsError::NotFound(id.to_string()))?
+        }; // id_map read lock released here.
 
-        if let Some(vec) = vector {
+        if let Some(ref vec) = vector {
             if vec.len() != self.dim {
                 return Err(VctrsError::DimensionMismatch { expected: self.dim, got: vec.len() });
             }
+        }
+
+        self.wal.lock().append(&WalEntry::Update {
+            id: id.to_string(),
+            vector: vector.clone(),
+            metadata: metadata.clone(),
+        })?;
+
+        if let Some(vec) = vector {
             self.index.write().update_vector(internal_id, vec);
         }
 
         if let Some(meta) = metadata {
-            self.metadata.write()[internal_id as usize] = meta;
+            let mut meta_store = self.metadata.write();
+            let mut mi = self.meta_index.write();
+            mi.remove(internal_id, &meta_store[internal_id as usize]);
+            mi.index(internal_id, &meta);
+            meta_store[internal_id as usize] = meta;
         }
 
         Ok(())
@@ -385,12 +620,26 @@ impl Database {
         });
 
         if let Some(f) = filter {
-            // In-graph filtering: the predicate is checked during HNSW traversal.
-            // Non-matching vectors still participate in graph navigation but are
-            // excluded from results. This is much more efficient than over-fetching.
-            let raw_results = index.search_filtered(query, k, ef, |id| {
-                f.matches(&metadata[id as usize])
-            });
+            // Try to use the inverted index for fast set-based filtering ($eq, $in).
+            // For filters that can be resolved, we get a HashSet of matching IDs and
+            // use O(1) set membership checks instead of per-candidate JSON parsing.
+            let mi = self.meta_index.read();
+            let resolved = f.resolve_from_index(&mi);
+            drop(mi);
+
+            let raw_results = if let Some(ref match_set) = resolved {
+                // Fast path: set membership check.
+                // For AND filters where some sub-filters were resolved and some weren't,
+                // we still need to check the unresolvable sub-filters per-candidate.
+                index.search_filtered(query, k, ef, |id| {
+                    match_set.contains(&id) && f.matches(&metadata[id as usize])
+                })
+            } else {
+                // Fallback: per-candidate metadata scan.
+                index.search_filtered(query, k, ef, |id| {
+                    f.matches(&metadata[id as usize])
+                })
+            };
 
             let results: Vec<SearchResult> = raw_results
                 .into_iter()
@@ -442,15 +691,35 @@ impl Database {
             base.max(k + extra)
         });
 
-        if filter.is_some() {
-            // For filtered search, fall back to per-query search.
-            drop(index);
-            drop(reverse_map);
-            drop(metadata);
-            return queries
-                .iter()
-                .map(|q| self.search(q, k, ef_search, filter))
+        if let Some(f) = filter {
+            // Parallel filtered search: resolve the index once, then fan out.
+            let mi = self.meta_index.read();
+            let resolved = f.resolve_from_index(&mi);
+            drop(mi);
+
+            let results: Vec<Vec<SearchResult>> = queries
+                .par_iter()
+                .map(|query| {
+                    let raw = if let Some(ref match_set) = resolved {
+                        index.search_filtered(query, k, ef, |id| {
+                            match_set.contains(&id) && f.matches(&metadata[id as usize])
+                        })
+                    } else {
+                        index.search_filtered(query, k, ef, |id| {
+                            f.matches(&metadata[id as usize])
+                        })
+                    };
+                    raw.into_iter()
+                        .map(|(internal_id, dist)| SearchResult {
+                            id: reverse_map[internal_id as usize].clone(),
+                            distance: dist,
+                            metadata: metadata[internal_id as usize].clone(),
+                        })
+                        .collect()
+                })
                 .collect();
+
+            return Ok(results);
         }
 
         let raw_results = index.search_many(queries, k, ef);
@@ -471,19 +740,22 @@ impl Database {
     }
 
     pub fn get(&self, id: &str) -> Result<(Vec<f32>, Option<serde_json::Value>)> {
-        let id_map = self.id_map.read();
-        let internal_id = id_map
-            .get(id)
-            .ok_or_else(|| VctrsError::NotFound(id.to_string()))?;
+        let internal_id = {
+            let id_map = self.id_map.read();
+            *id_map
+                .get(id)
+                .ok_or_else(|| VctrsError::NotFound(id.to_string()))?
+        };
 
-        let index = self.index.read();
-        let vector = index
-            .get_vector(*internal_id)
-            .ok_or_else(|| VctrsError::CorruptData("vector slot missing".to_string()))?
-            .to_vec();
+        let vector = {
+            let index = self.index.read();
+            index
+                .get_vector(internal_id)
+                .ok_or_else(|| VctrsError::CorruptData("vector slot missing".to_string()))?
+                .to_vec()
+        };
 
-        let metadata = self.metadata.read();
-        let meta = metadata[*internal_id as usize].clone();
+        let meta = self.metadata.read()[internal_id as usize].clone();
 
         Ok((vector, meta))
     }
@@ -575,15 +847,103 @@ impl Database {
 
         drop(old_metadata);
 
+        // Rebuild metadata index from scratch with the new metadata.
+        let empty_deleted = HashSet::new();
+        let mut mi = MetadataIndex::new();
+        mi.rebuild(&new_metadata, &empty_deleted);
+
         *id_map = new_id_map;
         *reverse_map = new_reverse_map;
         *self.metadata.write() = new_metadata;
+        *self.meta_index.write() = mi;
         *self.index.write() = new_index;
 
         Ok(())
     }
 
-    /// Persist to disk.
+    /// Replay WAL entries on top of the current in-memory state.
+    /// Called on startup after loading a snapshot.
+    fn replay_wal(&mut self) -> Result<()> {
+        let wal = self.wal.lock();
+        let entries = wal.read_entries()?;
+        drop(wal);
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        for entry in entries {
+            match entry {
+                WalEntry::Add { id, vector, metadata } => {
+                    // Use upsert semantics: if the id already exists (e.g. partial replay),
+                    // update it rather than failing on duplicate.
+                    let id_map = self.id_map.read();
+                    if let Some(&internal_id) = id_map.get(&id) {
+                        drop(id_map);
+                        self.index.write().update_vector(internal_id, vector);
+                        let mut meta_store = self.metadata.write();
+                        let mut mi = self.meta_index.write();
+                        mi.remove(internal_id, &meta_store[internal_id as usize]);
+                        mi.index(internal_id, &metadata);
+                        meta_store[internal_id as usize] = metadata;
+                    } else {
+                        drop(id_map);
+                        if vector.len() != self.dim {
+                            continue; // Skip corrupt entries.
+                        }
+                        let mut index = self.index.write();
+                        let internal_id = index.insert(vector);
+                        let mut id_map = self.id_map.write();
+                        id_map.insert(id.clone(), internal_id);
+                        let mut reverse_map = self.reverse_map.write();
+                        while reverse_map.len() <= internal_id as usize {
+                            reverse_map.push(String::new());
+                        }
+                        reverse_map[internal_id as usize] = id;
+                        let mut meta_store = self.metadata.write();
+                        while meta_store.len() <= internal_id as usize {
+                            meta_store.push(None);
+                        }
+                        self.meta_index.write().index(internal_id, &metadata);
+                        meta_store[internal_id as usize] = metadata;
+                    }
+                }
+                WalEntry::Delete { id } => {
+                    let mut id_map = self.id_map.write();
+                    if let Some(internal_id) = id_map.remove(&id) {
+                        self.index.write().mark_deleted(internal_id);
+                        self.reverse_map.write()[internal_id as usize] = String::new();
+                        let mut meta_store = self.metadata.write();
+                        self.meta_index.write().remove(internal_id, &meta_store[internal_id as usize]);
+                        meta_store[internal_id as usize] = None;
+                    }
+                }
+                WalEntry::Update { id, vector, metadata } => {
+                    let id_map = self.id_map.read();
+                    if let Some(&internal_id) = id_map.get(&id) {
+                        drop(id_map);
+                        if let Some(vec) = vector {
+                            if vec.len() == self.dim {
+                                self.index.write().update_vector(internal_id, vec);
+                            }
+                        }
+                        if let Some(meta) = metadata {
+                            let mut meta_store = self.metadata.write();
+                            let mut mi = self.meta_index.write();
+                            mi.remove(internal_id, &meta_store[internal_id as usize]);
+                            mi.index(internal_id, &meta);
+                            meta_store[internal_id as usize] = meta;
+                        }
+                    }
+                    // If the id doesn't exist, skip (it may have been deleted later in the WAL).
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Persist to disk. Writes a full snapshot and truncates the WAL.
     pub fn save(&self) -> Result<()> {
         let index = self.index.read();
         let id_map = self.id_map.read();
@@ -600,882 +960,14 @@ impl Database {
 
         self.storage
             .save(&index, &meta_records, self.quantize_on_save)?;
+
+        // Snapshot written successfully — truncate the WAL.
+        self.wal.lock().truncate()?;
+
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_add_and_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
-
-        db.add("a", vec![1.0, 0.0, 0.0], Some(serde_json::json!({"label": "x-axis"}))).unwrap();
-        db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
-        db.add("c", vec![0.0, 0.0, 1.0], None).unwrap();
-
-        let results = db.search(&[0.9, 0.1, 0.0], 2, None, None).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].id, "a");
-    }
-
-    #[test]
-    fn test_auto_detect_on_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-
-        {
-            let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Euclidean).unwrap();
-            db.add("x", vec![1.0, 2.0, 3.0], None).unwrap();
-            db.save().unwrap();
-        }
-
-        // Reopen with just the path — should auto-detect dim and metric.
-        {
-            let db = Database::open(path.to_str().unwrap()).unwrap();
-            assert_eq!(db.dim(), 3);
-            assert_eq!(db.metric(), Metric::Euclidean);
-            let (vec, _) = db.get("x").unwrap();
-            assert_eq!(vec, vec![1.0, 2.0, 3.0]);
-        }
-    }
-
-    #[test]
-    fn test_upsert() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        // Insert via upsert.
-        db.upsert("a", vec![1.0, 0.0], Some(serde_json::json!({"v": 1}))).unwrap();
-        assert_eq!(db.len(), 1);
-        let (vec, meta) = db.get("a").unwrap();
-        assert_eq!(vec, vec![1.0, 0.0]);
-        assert_eq!(meta.unwrap()["v"], 1);
-
-        // Update via upsert.
-        db.upsert("a", vec![0.0, 1.0], Some(serde_json::json!({"v": 2}))).unwrap();
-        assert_eq!(db.len(), 1);
-        let (vec, meta) = db.get("a").unwrap();
-        assert_eq!(vec, vec![0.0, 1.0]);
-        assert_eq!(meta.unwrap()["v"], 2);
-    }
-
-    #[test]
-    fn test_filtered_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "sci"}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"cat": "art"}))).unwrap();
-        db.add("c", vec![0.8, 0.2], Some(serde_json::json!({"cat": "sci"}))).unwrap();
-
-        // Unfiltered: a is closest.
-        let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
-        assert_eq!(results[0].id, "a");
-
-        // Filtered to cat=art: b is the only match.
-        let filter = Filter::Eq("cat".to_string(), serde_json::json!("art"));
-        let results = db.search(&[1.0, 0.0], 1, None, Some(&filter)).unwrap();
-        assert_eq!(results[0].id, "b");
-
-        // Filtered to cat=sci: a is closest.
-        let filter = Filter::Eq("cat".to_string(), serde_json::json!("sci"));
-        let results = db.search(&[1.0, 0.0], 2, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].id, "a");
-        assert_eq!(results[1].id, "c");
-    }
-
-    #[test]
-    fn test_ids() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        db.add("x", vec![1.0, 0.0], None).unwrap();
-        db.add("y", vec![0.0, 1.0], None).unwrap();
-
-        let mut ids = db.ids();
-        ids.sort();
-        assert_eq!(ids, vec!["x", "y"]);
-    }
-
-    #[test]
-    fn test_persistence_with_graph() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-
-        {
-            let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-            db.add("x", vec![1.0, 2.0], Some(serde_json::json!({"n": 1}))).unwrap();
-            db.add("y", vec![3.0, 4.0], None).unwrap();
-            db.save().unwrap();
-        }
-
-        {
-            let db = Database::open(path.to_str().unwrap()).unwrap();
-            assert_eq!(db.len(), 2);
-            let (vec, meta) = db.get("x").unwrap();
-            assert_eq!(vec, vec![1.0, 2.0]);
-            assert!(meta.is_some());
-
-            let results = db.search(&[1.0, 2.0], 1, None, None).unwrap();
-            assert_eq!(results[0].id, "x");
-        }
-    }
-
-    #[test]
-    fn test_duplicate_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        let result = db.add("a", vec![0.0, 1.0], None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
-
-        db.add("a", vec![1.0, 0.0, 0.0], None).unwrap();
-        db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
-        db.add("c", vec![0.0, 0.0, 1.0], None).unwrap();
-
-        assert_eq!(db.len(), 3);
-        assert!(db.delete("b").unwrap());
-        assert_eq!(db.len(), 2);
-        assert!(!db.contains("b"));
-
-        let results = db.search(&[0.0, 1.0, 0.0], 3, None, None).unwrap();
-        assert!(results.iter().all(|r| r.id != "b"));
-    }
-
-    #[test]
-    fn test_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"v": 1}))).unwrap();
-
-        db.update("a", Some(vec![0.0, 1.0]), None).unwrap();
-        let (vec, meta) = db.get("a").unwrap();
-        assert_eq!(vec, vec![0.0, 1.0]);
-        assert_eq!(meta.unwrap()["v"], 1);
-
-        db.update("a", None, Some(Some(serde_json::json!({"v": 2})))).unwrap();
-        let (_, meta) = db.get("a").unwrap();
-        assert_eq!(meta.unwrap()["v"], 2);
-    }
-
-    #[test]
-    fn test_batch_insert() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        let items = vec![
-            ("a".to_string(), vec![1.0, 0.0], None),
-            ("b".to_string(), vec![0.0, 1.0], Some(serde_json::json!({"x": 1}))),
-            ("c".to_string(), vec![1.0, 1.0], None),
-        ];
-        db.add_many(items).unwrap();
-        assert_eq!(db.len(), 3);
-
-        let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
-        assert_eq!(results[0].id, "a");
-    }
-
-    #[test]
-    fn test_compact_reclaims_slots() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
-
-        db.add("a", vec![1.0, 0.0, 0.0], Some(serde_json::json!({"v": 1}))).unwrap();
-        db.add("b", vec![0.0, 1.0, 0.0], Some(serde_json::json!({"v": 2}))).unwrap();
-        db.add("c", vec![0.0, 0.0, 1.0], Some(serde_json::json!({"v": 3}))).unwrap();
-        db.add("d", vec![0.5, 0.5, 0.0], None).unwrap();
-
-        // Delete two vectors.
-        db.delete("b").unwrap();
-        db.delete("d").unwrap();
-        assert_eq!(db.len(), 2);
-        assert_eq!(db.total_slots(), 4);
-        assert_eq!(db.deleted_count(), 2);
-
-        // Compact.
-        db.compact().unwrap();
-        assert_eq!(db.len(), 2);
-        assert_eq!(db.total_slots(), 2); // Slots reclaimed.
-        assert_eq!(db.deleted_count(), 0);
-
-        // Search still works.
-        let results = db.search(&[1.0, 0.0, 0.0], 1, None, None).unwrap();
-        assert_eq!(results[0].id, "a");
-
-        // Metadata preserved.
-        let (_, meta) = db.get("a").unwrap();
-        assert_eq!(meta.unwrap()["v"], 1);
-        let (_, meta) = db.get("c").unwrap();
-        assert_eq!(meta.unwrap()["v"], 3);
-
-        // Deleted ids are gone.
-        assert!(!db.contains("b"));
-        assert!(!db.contains("d"));
-    }
-
-    #[test]
-    fn test_compact_then_save_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-
-        {
-            let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-            db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"k": "a"}))).unwrap();
-            db.add("b", vec![0.0, 1.0], None).unwrap();
-            db.add("c", vec![1.0, 1.0], Some(serde_json::json!({"k": "c"}))).unwrap();
-            db.delete("b").unwrap();
-            db.compact().unwrap();
-            db.save().unwrap();
-        }
-
-        {
-            let db = Database::open(path.to_str().unwrap()).unwrap();
-            assert_eq!(db.len(), 2);
-            assert_eq!(db.total_slots(), 2);
-            assert!(db.contains("a"));
-            assert!(!db.contains("b"));
-            assert!(db.contains("c"));
-
-            let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
-            assert_eq!(results[0].id, "a");
-
-            let (_, meta) = db.get("c").unwrap();
-            assert_eq!(meta.unwrap()["k"], "c");
-        }
-    }
-
-    #[test]
-    fn test_compact_noop_when_no_deletes() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        db.add("b", vec![0.0, 1.0], None).unwrap();
-
-        db.compact().unwrap(); // Should be a no-op.
-        assert_eq!(db.len(), 2);
-        assert_eq!(db.total_slots(), 2);
-    }
-
-    #[test]
-    fn test_compact_all_deleted() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        db.add("b", vec![0.0, 1.0], None).unwrap();
-        db.delete("a").unwrap();
-        db.delete("b").unwrap();
-
-        db.compact().unwrap();
-        assert_eq!(db.len(), 0);
-        assert_eq!(db.total_slots(), 0);
-        assert_eq!(db.deleted_count(), 0);
-    }
-
-    #[test]
-    fn test_compact_then_insert() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        db.add("b", vec![0.0, 1.0], None).unwrap();
-        db.delete("a").unwrap();
-        db.compact().unwrap();
-
-        // Insert after compact.
-        db.add("c", vec![0.5, 0.5], Some(serde_json::json!({"new": true}))).unwrap();
-        assert_eq!(db.len(), 2);
-        assert_eq!(db.total_slots(), 2);
-
-        let results = db.search(&[0.5, 0.5], 1, None, None).unwrap();
-        assert_eq!(results[0].id, "c");
-    }
-
-    #[test]
-    fn test_delete_persistence() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-
-        {
-            let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-            db.add("a", vec![1.0, 0.0], None).unwrap();
-            db.add("b", vec![0.0, 1.0], None).unwrap();
-            db.delete("a").unwrap();
-            db.save().unwrap();
-        }
-
-        {
-            let db = Database::open(path.to_str().unwrap()).unwrap();
-            assert_eq!(db.len(), 1);
-            assert!(!db.contains("a"));
-            assert!(db.contains("b"));
-        }
-    }
-
-    // -- Edge case tests for Database layer -----------------------------------
-
-    #[test]
-    fn test_add_wrong_dimension() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
-
-        let result = db.add("a", vec![1.0, 0.0], None);
-        assert!(matches!(result.unwrap_err(), VctrsError::DimensionMismatch { expected: 3, got: 2 }));
-    }
-
-    #[test]
-    fn test_search_wrong_dimension() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
-        db.add("a", vec![1.0, 0.0, 0.0], None).unwrap();
-
-        let result = db.search(&[1.0, 0.0], 1, None, None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_get_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        let result = db.get("missing");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_delete_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        assert!(!db.delete("missing").unwrap());
-    }
-
-    #[test]
-    fn test_update_nonexistent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        let result = db.update("missing", Some(vec![1.0, 0.0]), None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_update_wrong_dimension() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-
-        let result = db.update("a", Some(vec![1.0, 0.0, 0.0]), None);
-        assert!(matches!(result.unwrap_err(), VctrsError::DimensionMismatch { expected: 2, got: 3 }));
-    }
-
-    #[test]
-    fn test_upsert_wrong_dimension() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        let result = db.upsert("a", vec![1.0], None);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_add_many_duplicate_in_batch() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        // Existing id.
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        let items = vec![
-            ("b".to_string(), vec![0.0, 1.0], None),
-            ("a".to_string(), vec![0.5, 0.5], None), // duplicate
-        ];
-        let result = db.add_many(items);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_add_many_wrong_dimension() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        let items = vec![
-            ("a".to_string(), vec![1.0, 0.0], None),
-            ("b".to_string(), vec![1.0], None), // wrong dim
-        ];
-        let result = db.add_many(items);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_open_nonexistent() {
-        let result = Database::open("/tmp/vctrs_definitely_not_here_12345");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_search_empty_db() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        let results = db.search(&[1.0, 0.0], 10, None, None).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_filtered_search_no_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-        db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"cat": "y"}))).unwrap();
-
-        let filter = Filter::Eq("cat".to_string(), serde_json::json!("z"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_filtered_search_with_ne() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"cat": "y"}))).unwrap();
-        db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-
-        let filter = Filter::Ne("cat".to_string(), serde_json::json!("x"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "b");
-    }
-
-    #[test]
-    fn test_filtered_search_with_in() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"cat": "y"}))).unwrap();
-        db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "z"}))).unwrap();
-
-        let filter = Filter::In("cat".to_string(), vec![serde_json::json!("x"), serde_json::json!("z")]);
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 2);
-        let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
-        assert!(ids.contains(&"a"));
-        assert!(ids.contains(&"c"));
-    }
-
-    #[test]
-    fn test_filtered_search_and_combinator() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "x", "val": 1}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"cat": "x", "val": 2}))).unwrap();
-        db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "y", "val": 1}))).unwrap();
-
-        let filter = Filter::And(vec![
-            Filter::Eq("cat".to_string(), serde_json::json!("x")),
-            Filter::Eq("val".to_string(), serde_json::json!(2)),
-        ]);
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "b");
-    }
-
-    #[test]
-    fn test_filtered_search_or_combinator() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"cat": "y"}))).unwrap();
-        db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "z"}))).unwrap();
-
-        let filter = Filter::Or(vec![
-            Filter::Eq("cat".to_string(), serde_json::json!("x")),
-            Filter::Eq("cat".to_string(), serde_json::json!("z")),
-        ]);
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn test_filter_no_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        // Vectors with no metadata should not match any Eq filter.
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-
-        let filter = Filter::Eq("cat".to_string(), serde_json::json!("x"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "b");
-    }
-
-    #[test]
-    fn test_compact_with_metadata_and_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"cat": "y"}))).unwrap();
-        db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-        db.delete("b").unwrap();
-        db.compact().unwrap();
-
-        // Filtered search should work after compact.
-        let filter = Filter::Eq("cat".to_string(), serde_json::json!("x"));
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].id, "a");
-    }
-
-    #[test]
-    fn test_upsert_then_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.upsert("a", vec![1.0, 0.0], None).unwrap();
-        db.upsert("b", vec![0.0, 1.0], None).unwrap();
-
-        // Move "a" to be near "b".
-        db.upsert("a", vec![0.0, 1.0], None).unwrap();
-
-        let results = db.search(&[0.0, 1.0], 2, None, None).unwrap();
-        // Both should be found at [0,1].
-        let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
-        assert!(ids.contains(&"a"));
-        assert!(ids.contains(&"b"));
-    }
-
-    #[test]
-    fn test_search_many_filtered() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"cat": "x"}))).unwrap();
-        db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"cat": "y"}))).unwrap();
-        db.add("c", vec![0.5, 0.5], Some(serde_json::json!({"cat": "x"}))).unwrap();
-
-        let filter = Filter::Eq("cat".to_string(), serde_json::json!("x"));
-        let results = db.search_many(
-            &[&[1.0, 0.0], &[0.0, 1.0]],
-            10, None, Some(&filter),
-        ).unwrap();
-
-        assert_eq!(results.len(), 2);
-        // Both query results should only contain cat=x items.
-        for batch in &results {
-            for r in batch {
-                assert!(r.id == "a" || r.id == "c");
-            }
-        }
-    }
-
-    #[test]
-    fn test_save_load_with_quantized_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-
-        {
-            let db = Database::open_or_create_with_config(
-                path.to_str().unwrap(), 2, Metric::Euclidean,
-                HnswConfig { m: 16, ef_construction: 200, quantize: true },
-            ).unwrap();
-            db.add("a", vec![1.0, 0.0], None).unwrap();
-            db.add("b", vec![0.0, 1.0], None).unwrap();
-            db.save().unwrap();
-        }
-
-        {
-            let db = Database::open(path.to_str().unwrap()).unwrap();
-            assert!(db.has_quantized_search());
-            let results = db.search(&[1.0, 0.0], 1, None, None).unwrap();
-            assert_eq!(results[0].id, "a");
-        }
-    }
-
-    #[test]
-    fn test_compact_then_save_load_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-
-        {
-            let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
-            db.add("a", vec![1.0, 0.0, 0.0], Some(serde_json::json!({"k": 1}))).unwrap();
-            db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
-            db.add("c", vec![0.0, 0.0, 1.0], Some(serde_json::json!({"k": 3}))).unwrap();
-            db.add("d", vec![0.5, 0.5, 0.0], None).unwrap();
-            db.delete("b").unwrap();
-            db.delete("d").unwrap();
-            db.compact().unwrap();
-            db.save().unwrap();
-        }
-
-        {
-            let db = Database::open(path.to_str().unwrap()).unwrap();
-            assert_eq!(db.len(), 2);
-            assert_eq!(db.total_slots(), 2);
-            assert!(db.contains("a"));
-            assert!(db.contains("c"));
-            assert!(!db.contains("b"));
-            assert!(!db.contains("d"));
-
-            let (_, meta) = db.get("a").unwrap();
-            assert_eq!(meta.unwrap()["k"], 1);
-
-            let results = db.search(&[1.0, 0.0, 0.0], 1, None, None).unwrap();
-            assert_eq!(results[0].id, "a");
-
-            // Can insert new items after load.
-            db.add("e", vec![0.0, 0.0, 1.0], None).unwrap();
-            assert_eq!(db.len(), 3);
-        }
-    }
-
-    #[test]
-    fn test_ids_after_operations() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
-
-        db.add("x", vec![1.0, 0.0], None).unwrap();
-        db.add("y", vec![0.0, 1.0], None).unwrap();
-        db.add("z", vec![0.5, 0.5], None).unwrap();
-
-        db.delete("y").unwrap();
-        let mut ids = db.ids();
-        ids.sort();
-        assert_eq!(ids, vec!["x", "z"]);
-
-        db.compact().unwrap();
-        let mut ids = db.ids();
-        ids.sort();
-        assert_eq!(ids, vec!["x", "z"]);
-    }
-
-    #[test]
-    fn test_len_consistency() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        assert_eq!(db.len(), 0);
-        assert!(db.is_empty());
-
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        assert_eq!(db.len(), 1);
-
-        db.add("b", vec![0.0, 1.0], None).unwrap();
-        assert_eq!(db.len(), 2);
-
-        db.delete("a").unwrap();
-        assert_eq!(db.len(), 1);
-        assert_eq!(db.deleted_count(), 1);
-        assert_eq!(db.total_slots(), 2);
-
-        db.compact().unwrap();
-        assert_eq!(db.len(), 1);
-        assert_eq!(db.deleted_count(), 0);
-        assert_eq!(db.total_slots(), 1);
-    }
-
-    #[test]
-    fn test_stats() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 3, Metric::Cosine).unwrap();
-
-        // Empty database stats.
-        let s = db.stats();
-        assert_eq!(s.num_vectors, 0);
-        assert_eq!(s.num_deleted, 0);
-        assert!(s.uses_brute_force);
-        assert!(!s.uses_quantized_search);
-
-        // Add some vectors.
-        db.add("a", vec![1.0, 0.0, 0.0], None).unwrap();
-        db.add("b", vec![0.0, 1.0, 0.0], None).unwrap();
-        db.add("c", vec![0.0, 0.0, 1.0], None).unwrap();
-
-        let s = db.stats();
-        assert_eq!(s.num_vectors, 3);
-        assert_eq!(s.num_deleted, 0);
-        assert!(s.memory_vectors_bytes > 0);
-        assert!(s.num_layers >= 1);
-
-        // Delete one.
-        db.delete("b").unwrap();
-        let s = db.stats();
-        assert_eq!(s.num_vectors, 2);
-        assert_eq!(s.num_deleted, 1);
-
-        // Enable quantized search.
-        db.enable_quantized_search();
-        let s = db.stats();
-        assert!(s.uses_quantized_search);
-        assert!(s.memory_quantized_bytes > 0);
-    }
-
-    #[test]
-    fn test_filter_gt() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"score": 10}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
-        db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"score": 30}))).unwrap();
-
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("score".into(), 15.0))).unwrap();
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|r| r.id != "a"));
-    }
-
-    #[test]
-    fn test_filter_gte() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"score": 10}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
-
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gte("score".into(), 20.0))).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "b");
-    }
-
-    #[test]
-    fn test_filter_lt() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"score": 10}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
-        db.add("c", vec![0.0, 1.0], Some(serde_json::json!({"score": 30}))).unwrap();
-
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Lt("score".into(), 25.0))).unwrap();
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|r| r.id != "c"));
-    }
-
-    #[test]
-    fn test_filter_lte() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"score": 10}))).unwrap();
-        db.add("b", vec![0.9, 0.1], Some(serde_json::json!({"score": 20}))).unwrap();
-
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Lte("score".into(), 10.0))).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "a");
-    }
-
-    #[test]
-    fn test_filter_range_combined() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        for i in 0..10 {
-            db.add(
-                &format!("v{}", i),
-                vec![i as f32, 0.0],
-                Some(serde_json::json!({"val": i})),
-            ).unwrap();
-        }
-
-        // 3 <= val < 7
-        let filter = Filter::And(vec![
-            Filter::Gte("val".into(), 3.0),
-            Filter::Lt("val".into(), 7.0),
-        ]);
-        let results = db.search(&[5.0, 0.0], 10, None, Some(&filter)).unwrap();
-        assert_eq!(results.len(), 4); // 3, 4, 5, 6
-        for r in &results {
-            let val = r.metadata.as_ref().unwrap()["val"].as_i64().unwrap();
-            assert!(val >= 3 && val < 7, "val {} not in [3, 7)", val);
-        }
-    }
-
-    #[test]
-    fn test_filter_gt_non_numeric_field_excluded() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], Some(serde_json::json!({"name": "alice"}))).unwrap();
-        db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"score": 10}))).unwrap();
-
-        // $gt on a string field should return no match for that doc.
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("name".into(), 5.0))).unwrap();
-        assert!(results.iter().all(|r| r.id != "a"), "string field matched numeric $gt");
-    }
-
-    #[test]
-    fn test_filter_gt_missing_field_excluded() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("testdb");
-        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Euclidean).unwrap();
-
-        db.add("a", vec![1.0, 0.0], None).unwrap();
-        db.add("b", vec![0.0, 1.0], Some(serde_json::json!({"score": 10}))).unwrap();
-
-        let results = db.search(&[1.0, 0.0], 10, None, Some(&Filter::Gt("score".into(), 5.0))).unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "b");
-    }
-}
+#[path = "db_tests.rs"]
+mod tests;

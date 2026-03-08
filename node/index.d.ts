@@ -72,4 +72,18 @@ export declare class VctrsDatabase {
   get length(): number
   get dim(): number
   get metric(): string
+  /** Async version of add. Returns a Promise. */
+  addAsync(id: string, vector: Array<number>, metadata?: any | undefined | null): Promise<void>
+  /** Async version of upsert. Returns a Promise. */
+  upsertAsync(id: string, vector: Array<number>, metadata?: any | undefined | null): Promise<void>
+  /** Async version of addMany. Returns a Promise. */
+  addManyAsync(ids: Array<string>, vectors: Array<Array<number>>, metadatas?: Array<any | undefined | null> | undefined | null): Promise<void>
+  /** Async version of search. Returns a Promise. */
+  searchAsync(vector: Array<number>, k?: number | undefined | null, efSearch?: number | undefined | null, whereFilter?: any | undefined | null): Promise<Array<SearchResult>>
+  /** Async version of searchMany. Returns a Promise. */
+  searchManyAsync(vectors: Array<Array<number>>, k?: number | undefined | null, efSearch?: number | undefined | null, whereFilter?: any | undefined | null): Promise<Array<Array<SearchResult>>>
+  /** Async version of save. Returns a Promise. */
+  saveAsync(): Promise<void>
+  /** Async version of delete. Returns a Promise. */
+  deleteAsync(id: string): Promise<boolean>
 }

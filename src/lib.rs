@@ -92,25 +92,32 @@ impl PyDatabase {
     }
 
     #[pyo3(signature = (id, vector, metadata = None))]
-    fn add(&self, id: &str, vector: VectorInput<'_>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    fn add(&self, py: Python<'_>, id: &str, vector: VectorInput<'_>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let vec = vector.to_vec()?;
         let meta = metadata.map(pythonize_dict).transpose()?;
-        self.inner.add(id, vec, meta)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let id = id.to_string();
+        py.allow_threads(|| {
+            self.inner.add(&id, vec, meta)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
     }
 
     /// Add or update a vector.
     #[pyo3(signature = (id, vector, metadata = None))]
-    fn upsert(&self, id: &str, vector: VectorInput<'_>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    fn upsert(&self, py: Python<'_>, id: &str, vector: VectorInput<'_>, metadata: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
         let vec = vector.to_vec()?;
         let meta = metadata.map(pythonize_dict).transpose()?;
-        self.inner.upsert(id, vec, meta)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let id = id.to_string();
+        py.allow_threads(|| {
+            self.inner.upsert(&id, vec, meta)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
     }
 
     #[pyo3(signature = (ids, vectors, metadatas = None))]
     fn add_many(
         &self,
+        py: Python<'_>,
         ids: Vec<String>,
         vectors: BatchVectorInput<'_>,
         metadatas: Option<&Bound<'_, PyList>>,
@@ -151,8 +158,10 @@ impl PyDatabase {
             .map(|((id, vec), meta)| (id, vec, meta))
             .collect();
 
-        self.inner.add_many(items)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        py.allow_threads(|| {
+            self.inner.add_many(items)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
     }
 
     /// Search for the k nearest neighbors.
@@ -161,6 +170,7 @@ impl PyDatabase {
     #[pyo3(signature = (vector, k = 10, ef_search = None, where_filter = None))]
     fn search(
         &self,
+        py: Python<'_>,
         vector: VectorInput<'_>,
         k: usize,
         ef_search: Option<usize>,
@@ -169,8 +179,10 @@ impl PyDatabase {
         let vec = vector.to_vec()?;
         let filter = where_filter.map(parse_filter).transpose()?;
 
-        let results = self.inner.search(&vec, k, ef_search, filter.as_ref())
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let results = py.allow_threads(|| {
+            self.inner.search(&vec, k, ef_search, filter.as_ref())
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
 
         Ok(results.into_iter()
             .map(|r| PySearchResult {
@@ -185,6 +197,7 @@ impl PyDatabase {
     #[pyo3(signature = (vectors, k = 10, ef_search = None))]
     fn search_many(
         &self,
+        py: Python<'_>,
         vectors: BatchVectorInput<'_>,
         k: usize,
         ef_search: Option<usize>,
@@ -192,8 +205,10 @@ impl PyDatabase {
         let vecs = vectors.to_vecs()?;
         let queries: Vec<&[f32]> = vecs.iter().map(|v| v.as_slice()).collect();
 
-        let results = self.inner.search_many(&queries, k, ef_search, None)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let results = py.allow_threads(|| {
+            self.inner.search_many(&queries, k, ef_search, None)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })?;
 
         Ok(results
             .into_iter()
@@ -220,21 +235,28 @@ impl PyDatabase {
         })
     }
 
-    fn delete(&self, id: &str) -> PyResult<bool> {
-        self.inner.delete(id).map_err(|e| PyValueError::new_err(e.to_string()))
+    fn delete(&self, py: Python<'_>, id: &str) -> PyResult<bool> {
+        let id = id.to_string();
+        py.allow_threads(|| {
+            self.inner.delete(&id).map_err(|e| PyValueError::new_err(e.to_string()))
+        })
     }
 
     #[pyo3(signature = (id, vector = None, metadata = None))]
     fn update(
         &self,
+        py: Python<'_>,
         id: &str,
         vector: Option<VectorInput<'_>>,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let vec = vector.map(|v| v.to_vec()).transpose()?;
         let meta = metadata.map(|d| pythonize_dict(d).map(Some)).transpose()?;
-        self.inner.update(id, vec, meta)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+        let id = id.to_string();
+        py.allow_threads(|| {
+            self.inner.update(&id, vec, meta)
+                .map_err(|e| PyValueError::new_err(e.to_string()))
+        })
     }
 
     fn __contains__(&self, id: &str) -> bool {
@@ -245,14 +267,18 @@ impl PyDatabase {
         self.inner.ids()
     }
 
-    fn save(&self) -> PyResult<()> {
-        self.inner.save().map_err(|e| PyValueError::new_err(e.to_string()))
+    fn save(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| {
+            self.inner.save().map_err(|e| PyValueError::new_err(e.to_string()))
+        })
     }
 
     /// Rebuild the index with only live vectors, reclaiming deleted slots.
     /// Call this after many deletes to reduce memory usage and disk size.
-    fn compact(&self) -> PyResult<()> {
-        self.inner.compact().map_err(|e| PyValueError::new_err(e.to_string()))
+    fn compact(&self, py: Python<'_>) -> PyResult<()> {
+        py.allow_threads(|| {
+            self.inner.compact().map_err(|e| PyValueError::new_err(e.to_string()))
+        })
     }
 
     /// Enable quantized search: uses SQ8 quantized vectors for faster HNSW traversal

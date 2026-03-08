@@ -1,5 +1,7 @@
 use napi::bindgen_prelude::*;
+use napi::Task;
 use napi_derive::napi;
+use std::sync::Arc;
 use vctrs_core::db::{Database, Filter, HnswConfig};
 use vctrs_core::distance::Metric;
 
@@ -16,9 +18,17 @@ pub struct GetResult {
     pub metadata: Option<serde_json::Value>,
 }
 
+fn convert_results(results: Vec<vctrs_core::db::SearchResult>) -> Vec<SearchResult> {
+    results.into_iter().map(|r| SearchResult {
+        id: r.id,
+        distance: r.distance as f64,
+        metadata: r.metadata,
+    }).collect()
+}
+
 #[napi]
 pub struct VctrsDatabase {
-    inner: Database,
+    inner: Arc<Database>,
 }
 
 #[napi]
@@ -38,7 +48,7 @@ impl VctrsDatabase {
         if dim.is_none() {
             let db = Database::open(&path)
                 .map_err(|e| Error::from_reason(e.to_string()))?;
-            return Ok(VctrsDatabase { inner: db });
+            return Ok(VctrsDatabase { inner: Arc::new(db) });
         }
 
         let dim = dim.unwrap();
@@ -60,8 +70,10 @@ impl VctrsDatabase {
         let db = Database::open_or_create_with_config(&path, dim as usize, m, config)
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
-        Ok(VctrsDatabase { inner: db })
+        Ok(VctrsDatabase { inner: Arc::new(db) })
     }
+
+    // -- Sync methods ---------------------------------------------------------
 
     #[napi]
     pub fn add(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> Result<()> {
@@ -104,7 +116,8 @@ impl VctrsDatabase {
     }
 
     /// Search for k nearest neighbors.
-    /// `whereFilter`: optional object like { field: "value" } or { field: { $ne: "value" } }
+    /// `whereFilter`: optional object like { field: "value" }, { field: { $ne: "value" } },
+    /// { field: { $in: ["a", "b"] } }, or { field: { $gt: 10, $lte: 20 } }
     #[napi]
     pub fn search(
         &self,
@@ -121,15 +134,12 @@ impl VctrsDatabase {
         let results = self.inner.search(&vec_f32, k, ef, filter.as_ref())
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
-        Ok(results.into_iter().map(|r| SearchResult {
-            id: r.id,
-            distance: r.distance as f64,
-            metadata: r.metadata,
-        }).collect())
+        Ok(convert_results(results))
     }
 
     /// Search multiple queries in parallel. Returns array of result arrays.
-    /// `whereFilter`: optional object like { field: "value" } or { field: { $ne: "value" } }
+    /// `whereFilter`: optional object like { field: "value" }, { field: { $ne: "value" } },
+    /// { field: { $in: ["a", "b"] } }, or { field: { $gt: 10, $lte: 20 } }
     #[napi]
     pub fn search_many(
         &self,
@@ -150,19 +160,7 @@ impl VctrsDatabase {
         let results = self.inner.search_many(&queries, k, ef, filter.as_ref())
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
-        Ok(results
-            .into_iter()
-            .map(|batch| {
-                batch
-                    .into_iter()
-                    .map(|r| SearchResult {
-                        id: r.id,
-                        distance: r.distance as f64,
-                        metadata: r.metadata,
-                    })
-                    .collect()
-            })
-            .collect())
+        Ok(results.into_iter().map(convert_results).collect())
     }
 
     #[napi]
@@ -235,7 +233,6 @@ impl VctrsDatabase {
     }
 
     /// Rebuild the index with only live vectors, reclaiming deleted slots.
-    /// Call this after many deletes to reduce memory usage and disk size.
     #[napi]
     pub fn compact(&self) -> Result<()> {
         self.inner.compact().map_err(|e| Error::from_reason(e.to_string()))
@@ -290,7 +287,272 @@ impl VctrsDatabase {
             Metric::DotProduct => "dot_product".to_string(),
         }
     }
+
+    // -- Async methods (return Promises, run on libuv thread pool) -------------
+
+    /// Async version of add. Returns a Promise.
+    #[napi]
+    pub fn add_async(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> AsyncTask<AddTask> {
+        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
+        AsyncTask::new(AddTask {
+            db: Arc::clone(&self.inner),
+            id,
+            vector: vec_f32,
+            metadata,
+        })
+    }
+
+    /// Async version of upsert. Returns a Promise.
+    #[napi]
+    pub fn upsert_async(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> AsyncTask<UpsertTask> {
+        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
+        AsyncTask::new(UpsertTask {
+            db: Arc::clone(&self.inner),
+            id,
+            vector: vec_f32,
+            metadata,
+        })
+    }
+
+    /// Async version of addMany. Returns a Promise.
+    #[napi]
+    pub fn add_many_async(
+        &self,
+        ids: Vec<String>,
+        vectors: Vec<Vec<f64>>,
+        metadatas: Option<Vec<Option<serde_json::Value>>>,
+    ) -> Result<AsyncTask<AddManyTask>> {
+        let metas = metadatas.unwrap_or_else(|| vec![None; ids.len()]);
+        if ids.len() != vectors.len() {
+            return Err(Error::from_reason(format!(
+                "ids length ({}) != vectors length ({})", ids.len(), vectors.len()
+            )));
+        }
+        let items: Vec<_> = ids.into_iter()
+            .zip(vectors.into_iter().map(|v| v.iter().map(|&x| x as f32).collect::<Vec<f32>>()))
+            .zip(metas)
+            .map(|((id, vec), meta)| (id, vec, meta))
+            .collect();
+
+        Ok(AsyncTask::new(AddManyTask {
+            db: Arc::clone(&self.inner),
+            items,
+        }))
+    }
+
+    /// Async version of search. Returns a Promise<SearchResult[]>.
+    #[napi]
+    pub fn search_async(
+        &self,
+        vector: Vec<f64>,
+        k: Option<u32>,
+        ef_search: Option<u32>,
+        where_filter: Option<serde_json::Value>,
+    ) -> Result<AsyncTask<SearchTask>> {
+        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
+        let k = k.unwrap_or(10) as usize;
+        let ef = ef_search.map(|e| e as usize);
+        let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
+
+        Ok(AsyncTask::new(SearchTask {
+            db: Arc::clone(&self.inner),
+            query: vec_f32,
+            k,
+            ef,
+            filter,
+        }))
+    }
+
+    /// Async version of searchMany. Returns a Promise<SearchResult[][]>.
+    #[napi]
+    pub fn search_many_async(
+        &self,
+        vectors: Vec<Vec<f64>>,
+        k: Option<u32>,
+        ef_search: Option<u32>,
+        where_filter: Option<serde_json::Value>,
+    ) -> Result<AsyncTask<SearchManyTask>> {
+        let vecs_f32: Vec<Vec<f32>> = vectors
+            .iter()
+            .map(|v| v.iter().map(|&x| x as f32).collect())
+            .collect();
+        let k = k.unwrap_or(10) as usize;
+        let ef = ef_search.map(|e| e as usize);
+        let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
+
+        Ok(AsyncTask::new(SearchManyTask {
+            db: Arc::clone(&self.inner),
+            queries: vecs_f32,
+            k,
+            ef,
+            filter,
+        }))
+    }
+
+    /// Async version of save. Returns a Promise.
+    #[napi]
+    pub fn save_async(&self) -> AsyncTask<SaveTask> {
+        AsyncTask::new(SaveTask { db: Arc::clone(&self.inner) })
+    }
+
+    /// Async version of delete. Returns a Promise<boolean>.
+    #[napi]
+    pub fn delete_async(&self, id: String) -> AsyncTask<DeleteTask> {
+        AsyncTask::new(DeleteTask { db: Arc::clone(&self.inner), id })
+    }
 }
+
+// -- AsyncTask implementations ------------------------------------------------
+
+pub struct AddTask {
+    db: Arc<Database>,
+    id: String,
+    vector: Vec<f32>,
+    metadata: Option<serde_json::Value>,
+}
+
+#[napi]
+impl Task for AddTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.add(&self.id, std::mem::take(&mut self.vector), self.metadata.take())
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+pub struct UpsertTask {
+    db: Arc<Database>,
+    id: String,
+    vector: Vec<f32>,
+    metadata: Option<serde_json::Value>,
+}
+
+#[napi]
+impl Task for UpsertTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.upsert(&self.id, std::mem::take(&mut self.vector), self.metadata.take())
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+pub struct AddManyTask {
+    db: Arc<Database>,
+    items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
+}
+
+#[napi]
+impl Task for AddManyTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.add_many(std::mem::take(&mut self.items))
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+pub struct SearchTask {
+    db: Arc<Database>,
+    query: Vec<f32>,
+    k: usize,
+    ef: Option<usize>,
+    filter: Option<Filter>,
+}
+
+#[napi]
+impl Task for SearchTask {
+    type Output = Vec<vctrs_core::db::SearchResult>;
+    type JsValue = Vec<SearchResult>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.search(&self.query, self.k, self.ef, self.filter.as_ref())
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(convert_results(output))
+    }
+}
+
+pub struct SearchManyTask {
+    db: Arc<Database>,
+    queries: Vec<Vec<f32>>,
+    k: usize,
+    ef: Option<usize>,
+    filter: Option<Filter>,
+}
+
+#[napi]
+impl Task for SearchManyTask {
+    type Output = Vec<Vec<vctrs_core::db::SearchResult>>;
+    type JsValue = Vec<Vec<SearchResult>>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let refs: Vec<&[f32]> = self.queries.iter().map(|v| v.as_slice()).collect();
+        self.db.search_many(&refs, self.k, self.ef, self.filter.as_ref())
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output.into_iter().map(convert_results).collect())
+    }
+}
+
+pub struct SaveTask {
+    db: Arc<Database>,
+}
+
+#[napi]
+impl Task for SaveTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.save().map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+pub struct DeleteTask {
+    db: Arc<Database>,
+    id: String,
+}
+
+#[napi]
+impl Task for DeleteTask {
+    type Output = bool;
+    type JsValue = bool;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        self.db.delete(&self.id).map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+// -- Filter parsing -----------------------------------------------------------
 
 /// Parse a JS filter object into a Filter.
 fn parse_js_filter(value: &serde_json::Value) -> Result<Filter> {
