@@ -23,12 +23,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+          allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
           manylinux: auto
       - uses: actions/upload-artifact@v4
         with:
@@ -50,12 +56,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+          allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.platform.target }}
@@ -68,11 +80,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: |
+            3.9
+            3.10
+            3.11
+            3.12
+            3.13
+          allow-prereleases: true
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist
+          args: --release --out dist --interpreter 3.9 3.10 3.11 3.12 3.13
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x64
