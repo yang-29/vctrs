@@ -2,13 +2,19 @@
 
 Try vctrs in the browser. Everything below runs client-side via WebAssembly — no server, no network requests.
 
-<iframe src="../demo.html" width="100%" height="900" frameborder="0" style="border: 1px solid #e0e0e0; border-radius: 8px;"></iframe>
+<iframe src="../demo.html" width="100%" height="950" frameborder="0" style="border: 1px solid #e0e0e0; border-radius: 8px;"></iframe>
 
-!!! tip "How to use"
-    1. **Pick a preset** — Movies, Cities, or Foods. Each loads 20 items as 8-dimensional vectors.
-    2. **Click a suggested search** — each one explains what it searches for and why those results appear.
-    3. **Experiment** — edit the query vector, change k, add your own vectors, or delete items and re-search.
+## Two modes
 
-    The 8 dimensions represent different qualities (e.g. for Movies: action, comedy, drama, sci-fi, romance, horror, animation, indie). Higher values = more of that quality. Cosine similarity finds vectors pointing in the same direction regardless of magnitude.
+### Manual Vectors (default)
+Pick a preset (Movies, Cities, or Foods) — each loads 20 items as 8-dimensional vectors where each dimension represents a quality. Click suggested searches to see how cosine similarity finds related items.
 
-The WASM binary is ~220KB. Source: [`wasm/src/lib.rs`](https://github.com/yang-29/vctrs/blob/main/wasm/src/lib.rs).
+### Semantic Search (AI)
+Click **Semantic Search (AI)** to enable real natural-language search powered by a transformer model ([all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2)) running entirely in your browser. The model (~25MB) is downloaded once and cached.
+
+Load a preset (Sentences, Products, or Questions), then search with plain English — the model embeds your query into 384 dimensions and vctrs finds the closest matches.
+
+!!! note "Everything runs locally"
+    Both the vctrs WASM binary (~220KB) and the transformer model run entirely in your browser. No data is sent to any server.
+
+Source: [`wasm/src/lib.rs`](https://github.com/yang-29/vctrs/blob/main/wasm/src/lib.rs)

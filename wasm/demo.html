@@ -20,22 +20,24 @@
     padding: 14px;
   }
   label { display: block; font-size: 0.82rem; font-weight: 500; margin-bottom: 3px; color: #555; }
-  input, select {
+  input, select, textarea {
     width: 100%; padding: 7px 10px; border: 1px solid #d0d0d0; border-radius: 6px;
     font-family: 'JetBrains Mono', monospace; font-size: 0.82rem;
     background: #fafafa;
   }
-  input:focus, select:focus { outline: none; border-color: #7c4dff; }
+  textarea { resize: vertical; min-height: 60px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #7c4dff; }
   button {
     padding: 6px 14px; border: none; border-radius: 6px; cursor: pointer;
     font-size: 0.82rem; font-weight: 500; transition: background 0.15s;
   }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn-primary { background: #7c4dff; color: #fff; }
-  .btn-primary:hover { background: #651fff; }
+  .btn-primary:hover:not(:disabled) { background: #651fff; }
   .btn-secondary { background: #f0f0f0; color: #333; border: 1px solid #d0d0d0; }
-  .btn-secondary:hover { background: #e4e4e4; }
+  .btn-secondary:hover:not(:disabled) { background: #e4e4e4; }
   .btn-danger { background: #ff5252; color: #fff; }
-  .btn-danger:hover { background: #ff1744; }
+  .btn-danger:hover:not(:disabled) { background: #ff1744; }
   .btn-row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
   .log {
     padding: 8px 12px; border-radius: 6px; font-size: 0.8rem;
@@ -45,11 +47,14 @@
   }
   .tag {
     display: inline-block; padding: 2px 8px; border-radius: 4px;
-    font-size: 0.75rem; font-weight: 600; margin-bottom: 12px;
+    font-size: 0.75rem; font-weight: 600; margin-bottom: 4px; margin-right: 6px;
   }
   .tag-loading { background: #fff3e0; color: #e65100; }
   .tag-ready { background: #e8f5e9; color: #2e7d32; }
   .tag-error { background: #ffebee; color: #c62828; }
+  .tag-ai { background: #e3f2fd; color: #1565c0; }
+  .tag-ai-loading { background: #fff3e0; color: #e65100; }
+  .tag-ai-ready { background: #e8f5e9; color: #2e7d32; }
   table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 6px; }
   th { text-align: left; padding: 5px 8px; border-bottom: 2px solid #e0e0e0; font-weight: 600; }
   td { padding: 5px 8px; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; }
@@ -61,17 +66,49 @@
   .suggested button { font-size: 0.75rem; padding: 4px 10px; }
   .preset-desc { font-size: 0.78rem; color: #666; margin-top: 6px; line-height: 1.4; }
   .vector-table { max-height: 260px; overflow-y: auto; }
+  .mode-toggle {
+    display: inline-flex; border: 1px solid #d0d0d0; border-radius: 6px; overflow: hidden;
+    margin-bottom: 12px;
+  }
+  .mode-toggle button {
+    border-radius: 0; border: none; padding: 6px 16px; font-size: 0.82rem;
+    background: #f5f5f5; color: #666; font-weight: 500;
+  }
+  .mode-toggle button.active { background: #7c4dff; color: #fff; }
+  .mode-toggle button:hover:not(.active) { background: #e8e8e8; }
+  .progress-bar {
+    width: 100%; height: 6px; background: #e0e0e0; border-radius: 3px;
+    overflow: hidden; margin-top: 6px;
+  }
+  .progress-bar-fill {
+    height: 100%; background: #7c4dff; border-radius: 3px;
+    transition: width 0.2s ease;
+  }
+  .semantic-note {
+    font-size: 0.78rem; color: #666; line-height: 1.5; margin-bottom: 10px;
+    padding: 8px 12px; background: #f0f4ff; border-radius: 6px; border: 1px solid #d0d8f0;
+  }
 </style>
 </head>
 <body>
 
-<span class="tag tag-loading" id="status-tag">Loading WASM...</span>
+<div style="margin-bottom: 8px">
+  <span class="tag tag-loading" id="status-tag">Loading WASM...</span>
+  <span class="tag tag-ai" id="ai-tag" style="display:none">AI Model: not loaded</span>
+</div>
+
 <div id="app" style="display:none">
+
+<div class="mode-toggle">
+  <button class="active" id="mode-manual" onclick="setMode('manual')">Manual Vectors</button>
+  <button id="mode-semantic" onclick="setMode('semantic')">Semantic Search (AI)</button>
+</div>
 
 <div class="grid">
   <!-- Left column -->
   <div>
-    <div class="card">
+    <!-- Manual mode: presets -->
+    <div class="card" id="panel-presets">
       <h2>Presets</h2>
       <p class="hint" style="margin:0 0 8px">Load a dataset to explore vector search. Each preset uses 8-dimensional vectors encoding different properties.</p>
       <div class="btn-row">
@@ -82,12 +119,35 @@
       <div id="preset-desc" class="preset-desc"></div>
     </div>
 
+    <!-- Semantic mode: load model + add text -->
+    <div class="card" id="panel-semantic-setup" style="display:none">
+      <h2>Semantic Search</h2>
+      <div class="semantic-note">
+        Uses <b>all-MiniLM-L6-v2</b> (384 dimensions) running entirely in your browser via WebAssembly. The model (~25MB) is downloaded once and cached.
+      </div>
+      <button class="btn-primary" id="btn-load-model" onclick="loadModel()">Load AI Model (~25MB)</button>
+      <div id="model-progress" style="display:none">
+        <div class="hint" id="model-progress-text">Downloading model...</div>
+        <div class="progress-bar"><div class="progress-bar-fill" id="model-progress-bar" style="width:0%"></div></div>
+      </div>
+      <div id="semantic-presets" style="display:none;margin-top:12px">
+        <label>Quick presets</label>
+        <div class="btn-row">
+          <button class="btn-secondary" onclick="loadSemanticPreset('sentences')">Sentences (15)</button>
+          <button class="btn-secondary" onclick="loadSemanticPreset('products')">Products (15)</button>
+          <button class="btn-secondary" onclick="loadSemanticPreset('questions')">Questions (15)</button>
+        </div>
+        <div id="semantic-preset-desc" class="preset-desc"></div>
+      </div>
+    </div>
+
     <div class="card" style="margin-top:12px">
       <h2>Database <span id="db-info" style="font-weight:normal;font-size:0.82rem;color:#888"></span></h2>
       <div class="vector-table" id="vector-list"><span class="empty">Load a preset or add vectors</span></div>
     </div>
 
-    <div class="card" style="margin-top:12px">
+    <!-- Manual mode: add vector -->
+    <div class="card" style="margin-top:12px" id="panel-add-manual">
       <h2>Add Custom Vector</h2>
       <label for="add-id">ID</label>
       <input id="add-id" placeholder="e.g. my_item" />
@@ -101,18 +161,37 @@
         <button class="btn-danger" onclick="resetDb()">Reset</button>
       </div>
     </div>
+
+    <!-- Semantic mode: add text -->
+    <div class="card" style="margin-top:12px;display:none" id="panel-add-semantic">
+      <h2>Add Text</h2>
+      <label for="add-text">Text to embed</label>
+      <textarea id="add-text" placeholder="e.g. The quick brown fox jumps over the lazy dog"></textarea>
+      <div class="btn-row">
+        <button class="btn-primary" id="btn-add-text" onclick="addText()" disabled>Add Text</button>
+        <button class="btn-danger" onclick="resetDb()">Reset</button>
+      </div>
+    </div>
   </div>
 
   <!-- Right column -->
   <div>
     <div class="card">
       <h2>Search</h2>
-      <label for="search-vec">Query Vector</label>
-      <input id="search-vec" placeholder="click a suggested search or enter 8 floats" />
+      <!-- Manual search -->
+      <div id="panel-search-manual">
+        <label for="search-vec">Query Vector</label>
+        <input id="search-vec" placeholder="click a suggested search or enter 8 floats" />
+      </div>
+      <!-- Semantic search -->
+      <div id="panel-search-semantic" style="display:none">
+        <label for="search-text">Search query (natural language)</label>
+        <input id="search-text" placeholder="e.g. how does gravity work?" />
+      </div>
       <label for="search-k" style="margin-top:6px">k (results)</label>
       <input id="search-k" type="number" value="5" min="1" max="100" />
       <div class="btn-row">
-        <button class="btn-primary" onclick="doSearch()">Search</button>
+        <button class="btn-primary" onclick="doSearch()" id="btn-search">Search</button>
       </div>
       <div id="suggested-searches"></div>
     </div>
@@ -134,17 +213,236 @@
 <script type="module">
 import init, { VctrsDatabase } from "./pkg/vctrs_wasm.js";
 
-const DIM = 8;
+let currentMode = "manual";
+const MANUAL_DIM = 8;
+const SEMANTIC_DIM = 384;
+let dim = MANUAL_DIM;
 let db;
 const vectors = new Map();
 let randomCounter = 0;
+let embedder = null;
 
 const logEl = document.getElementById("log");
 const log = (msg) => { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; };
 
-// ── Presets ─────────────────────────────────────────────────────────────
-// Each vector is 8 dimensions. The dimensions are thematic per preset
-// (explained in the description) to make search results intuitive.
+// ── Mode switching ────────────────────────────────────────────────────
+
+window.setMode = function(mode) {
+  currentMode = mode;
+  document.getElementById("mode-manual").className = mode === "manual" ? "active" : "";
+  document.getElementById("mode-semantic").className = mode === "semantic" ? "active" : "";
+
+  const show = (id, v) => document.getElementById(id).style.display = v ? "" : "none";
+  show("panel-presets", mode === "manual");
+  show("panel-add-manual", mode === "manual");
+  show("panel-search-manual", mode === "manual");
+  show("panel-semantic-setup", mode === "semantic");
+  show("panel-add-semantic", mode === "semantic");
+  show("panel-search-semantic", mode === "semantic");
+  show("ai-tag", mode === "semantic");
+
+  dim = mode === "manual" ? MANUAL_DIM : SEMANTIC_DIM;
+  resetDbInner();
+  currentSearches = [];
+  showSuggested([]);
+  document.getElementById("preset-desc").innerHTML = "";
+  document.getElementById("semantic-preset-desc").innerHTML = "";
+  document.getElementById("results").innerHTML = '<span class="empty">Load a preset and try a search</span>';
+  log(`Switched to ${mode === "manual" ? "manual vector" : "semantic search"} mode (dim=${dim})`);
+  updateInfo();
+};
+
+// ── AI Model ──────────────────────────────────────────────────────────
+
+async function embed(text) {
+  const output = await embedder(text, { pooling: "mean", normalize: true });
+  return output.tolist()[0];
+}
+
+async function embedBatch(texts) {
+  const output = await embedder(texts, { pooling: "mean", normalize: true });
+  return output.tolist();
+}
+
+window.loadModel = async function() {
+  if (embedder) return;
+  const btn = document.getElementById("btn-load-model");
+  btn.disabled = true;
+  btn.textContent = "Loading...";
+  document.getElementById("model-progress").style.display = "";
+  const progressText = document.getElementById("model-progress-text");
+  const progressBar = document.getElementById("model-progress-bar");
+  const aiTag = document.getElementById("ai-tag");
+  aiTag.className = "tag tag-ai-loading";
+  aiTag.textContent = "AI Model: loading...";
+
+  try {
+    const { pipeline } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1");
+
+    embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", {
+      progress_callback: (data) => {
+        if (data.status === "progress" && data.total) {
+          const pct = Math.round(data.progress);
+          progressBar.style.width = pct + "%";
+          const mb = (data.loaded / 1024 / 1024).toFixed(1);
+          const totalMb = (data.total / 1024 / 1024).toFixed(1);
+          progressText.textContent = `Downloading: ${mb}MB / ${totalMb}MB (${pct}%)`;
+        }
+      }
+    });
+
+    progressBar.style.width = "100%";
+    progressText.textContent = "Model ready!";
+    aiTag.className = "tag tag-ai-ready";
+    aiTag.textContent = "AI Model: ready";
+    btn.textContent = "Model loaded";
+    document.getElementById("btn-add-text").disabled = false;
+    document.getElementById("semantic-presets").style.display = "";
+    log("AI model loaded (all-MiniLM-L6-v2, 384 dims)");
+  } catch (e) {
+    aiTag.className = "tag tag-error";
+    aiTag.textContent = "AI Model: error";
+    progressText.textContent = `Error: ${e.message}`;
+    btn.disabled = false;
+    btn.textContent = "Retry";
+    log(`Error loading model: ${e.message}`);
+  }
+};
+
+// ── Semantic presets ──────────────────────────────────────────────────
+
+const SEMANTIC_PRESETS = {
+  sentences: {
+    desc: "Real sentences embedded with all-MiniLM-L6-v2. Search with natural language to find semantically similar text.",
+    items: [
+      { id: "gravity", text: "Gravity pulls objects toward the center of the Earth" },
+      { id: "photosynthesis", text: "Plants convert sunlight into energy through photosynthesis" },
+      { id: "democracy", text: "Democracy is a system where citizens vote for their leaders" },
+      { id: "neural_nets", text: "Neural networks learn patterns from large amounts of training data" },
+      { id: "climate", text: "Climate change is caused by greenhouse gas emissions from burning fossil fuels" },
+      { id: "dna", text: "DNA contains the genetic instructions for building and maintaining living organisms" },
+      { id: "economics", text: "Supply and demand determine the prices of goods in a market economy" },
+      { id: "relativity", text: "Einstein showed that time moves slower near massive objects" },
+      { id: "evolution", text: "Species evolve over millions of years through natural selection" },
+      { id: "quantum", text: "Quantum particles can exist in multiple states simultaneously until observed" },
+      { id: "cooking", text: "The best way to cook a steak is to sear it on high heat for a crispy crust" },
+      { id: "sleep", text: "Getting eight hours of sleep each night is important for brain health" },
+      { id: "exercise", text: "Regular physical exercise reduces the risk of heart disease" },
+      { id: "music", text: "Mozart composed his first symphony when he was just eight years old" },
+      { id: "ocean", text: "The deepest point in the ocean is the Mariana Trench at 36,000 feet" },
+    ],
+    searches: [
+      { label: "Physics", query: "laws of physics and motion", hint: "Should find gravity, relativity, quantum" },
+      { label: "Biology", query: "how do living things work", hint: "Should find DNA, evolution, photosynthesis" },
+      { label: "Health", query: "staying healthy and fit", hint: "Should find exercise, sleep" },
+      { label: "AI & ML", query: "artificial intelligence and machine learning", hint: "Should find neural networks" },
+      { label: "Environment", query: "pollution and the planet", hint: "Should find climate change" },
+      { label: "Food", query: "preparing delicious meals", hint: "Should find cooking" },
+    ]
+  },
+  products: {
+    desc: "Product descriptions embedded for semantic product search. Try searching by use case or feature.",
+    items: [
+      { id: "macbook_pro", text: "MacBook Pro 16-inch laptop with M3 chip, great for video editing and programming" },
+      { id: "airpods_pro", text: "AirPods Pro wireless earbuds with active noise cancellation" },
+      { id: "kindle", text: "Amazon Kindle e-reader with paper-like display for reading books" },
+      { id: "standing_desk", text: "Adjustable standing desk for ergonomic home office setup" },
+      { id: "yoga_mat", text: "Non-slip yoga mat for home workouts and stretching exercises" },
+      { id: "espresso_machine", text: "Breville espresso machine for making barista-quality coffee at home" },
+      { id: "air_purifier", text: "HEPA air purifier that removes allergens dust and pet dander from indoor air" },
+      { id: "running_shoes", text: "Nike running shoes with cushioned sole for long-distance jogging" },
+      { id: "mechanical_kbd", text: "Mechanical keyboard with Cherry MX switches for fast and accurate typing" },
+      { id: "instant_pot", text: "Instant Pot pressure cooker for making soups stews and rice quickly" },
+      { id: "noise_cancel_hp", text: "Sony WH-1000XM5 over-ear headphones with world-class noise cancellation" },
+      { id: "smart_watch", text: "Apple Watch with heart rate monitor step tracking and GPS for fitness" },
+      { id: "monitor_4k", text: "LG 4K monitor with HDR support for graphic design and photo editing" },
+      { id: "blender", text: "Vitamix blender for making smoothies protein shakes and soups" },
+      { id: "camping_tent", text: "Lightweight two-person camping tent that is waterproof and easy to set up" },
+    ],
+    searches: [
+      { label: "Work from home", query: "productive home office setup", hint: "Should find desk, keyboard, monitor" },
+      { label: "Music on the go", query: "listening to music while traveling", hint: "Should find AirPods, headphones" },
+      { label: "Fitness", query: "equipment for working out and exercise", hint: "Should find yoga mat, running shoes, watch" },
+      { label: "Kitchen", query: "cooking and making drinks at home", hint: "Should find espresso machine, blender, instant pot" },
+      { label: "Reading", query: "reading books comfortably", hint: "Should find Kindle" },
+      { label: "Outdoors", query: "outdoor adventure camping and hiking", hint: "Should find camping tent, running shoes" },
+    ]
+  },
+  questions: {
+    desc: "FAQ-style questions. Search with your own question to find the most similar one.",
+    items: [
+      { id: "q_return", text: "How do I return a product and get a refund?" },
+      { id: "q_password", text: "I forgot my password, how do I reset it?" },
+      { id: "q_shipping", text: "How long does shipping take and can I track my order?" },
+      { id: "q_cancel", text: "Can I cancel my subscription at any time?" },
+      { id: "q_payment", text: "What payment methods do you accept?" },
+      { id: "q_discount", text: "Are there any discount codes or promotions available?" },
+      { id: "q_size", text: "How do I find the right size for clothing?" },
+      { id: "q_warranty", text: "What does the warranty cover and how long does it last?" },
+      { id: "q_contact", text: "How can I contact customer support?" },
+      { id: "q_account", text: "How do I create an account on your website?" },
+      { id: "q_international", text: "Do you ship internationally and what are the customs fees?" },
+      { id: "q_gift", text: "Can I send a product as a gift to someone else?" },
+      { id: "q_bulk", text: "Do you offer bulk or wholesale pricing for large orders?" },
+      { id: "q_privacy", text: "How do you protect my personal data and privacy?" },
+      { id: "q_mobile", text: "Is there a mobile app available for iOS and Android?" },
+    ],
+    searches: [
+      { label: "Money back", query: "I want my money back", hint: "Should find return/refund question" },
+      { label: "Login help", query: "I can't log into my account", hint: "Should find password reset question" },
+      { label: "Where's my order?", query: "my package hasn't arrived yet", hint: "Should find shipping/tracking question" },
+      { label: "Save money", query: "how can I get a cheaper price", hint: "Should find discount/promo and bulk pricing" },
+      { label: "Data safety", query: "is my information secure", hint: "Should find privacy question" },
+      { label: "Gift ideas", query: "buying something for a friend", hint: "Should find gift question" },
+    ]
+  }
+};
+
+window.loadSemanticPreset = async function(name) {
+  if (!embedder) { log("Error: load the AI model first"); return; }
+  const preset = SEMANTIC_PRESETS[name];
+  resetDbInner();
+
+  const texts = preset.items.map(i => i.text);
+  log(`Embedding ${texts.length} items...`);
+  const t = performance.now();
+  const embeddings = await embedBatch(texts);
+  const embedTime = performance.now() - t;
+
+  for (let i = 0; i < preset.items.length; i++) {
+    const item = preset.items[i];
+    const vec = new Float32Array(embeddings[i]);
+    db.add(item.id, vec, { text: item.text });
+    vectors.set(item.id, { text: item.text });
+  }
+
+  log(`Loaded "${name}" preset (${texts.length} items, embedded in ${(embedTime/1000).toFixed(1)}s)`);
+  document.getElementById("semantic-preset-desc").innerHTML = preset.desc;
+
+  currentSearches = preset.searches;
+  showSuggestedSemantic(preset.searches);
+  updateInfo();
+};
+
+function showSuggestedSemantic(searches) {
+  const el = document.getElementById("suggested-searches");
+  if (!searches || searches.length === 0) { el.innerHTML = ''; return; }
+  let html = '<label style="margin-top:10px">Suggested searches</label><div class="suggested">';
+  for (let i = 0; i < searches.length; i++) {
+    html += `<button class="btn-secondary" onclick="useSuggestedSemantic(${i})">${searches[i].label}</button>`;
+  }
+  html += '</div><div class="hint" id="search-hint"></div>';
+  el.innerHTML = html;
+}
+
+window.useSuggestedSemantic = function(i) {
+  const s = currentSearches[i];
+  document.getElementById("search-text").value = s.query;
+  document.getElementById("search-hint").textContent = s.hint;
+  doSearch();
+};
+
+// ── Manual presets ────────────────────────────────────────────────────
 
 const PRESETS = {
   movies: {
@@ -263,10 +561,12 @@ function updateVectorList() {
     el.innerHTML = '<span class="empty">No vectors added yet</span>';
     return;
   }
-  let html = '<table><tr><th>ID</th><th>Metadata</th><th></th></tr>';
+  let html = '<table><tr><th>ID</th><th>' + (currentMode === "semantic" ? "Text" : "Metadata") + '</th><th></th></tr>';
   for (const [id, v] of vectors) {
-    const metaStr = v.meta ? JSON.stringify(v.meta) : "";
-    html += `<tr><td>${id}</td><td>${metaStr}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:0.72rem" onclick="deleteVec('${id}')">x</button></td></tr>`;
+    const display = currentMode === "semantic"
+      ? (v.text || "").substring(0, 80) + ((v.text || "").length > 80 ? "..." : "")
+      : (v.meta ? JSON.stringify(v.meta) : "");
+    html += `<tr><td>${id}</td><td style="font-family:inherit;font-size:0.78rem">${display}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:0.72rem" onclick="deleteVec('${id}')">x</button></td></tr>`;
   }
   html += '</table>';
   el.innerHTML = html;
@@ -318,7 +618,7 @@ window.addVector = function() {
   if (!id || !vecStr) { log("Error: ID and vector required"); return; }
   try {
     const vec = new Float32Array(vecStr.split(",").map(Number));
-    if (vec.length !== DIM) { log(`Error: expected ${DIM} dimensions, got ${vec.length}`); return; }
+    if (vec.length !== dim) { log(`Error: expected ${dim} dimensions, got ${vec.length}`); return; }
     const meta = metaStr ? JSON.parse(metaStr) : null;
     db.add(id, vec, meta);
     vectors.set(id, { vec: Array.from(vec), meta });
@@ -330,10 +630,29 @@ window.addVector = function() {
   } catch (e) { log(`Error: ${e}`); }
 };
 
+window.addText = async function() {
+  if (!embedder) { log("Error: load the AI model first"); return; }
+  const text = document.getElementById("add-text").value.trim();
+  if (!text) { log("Error: text required"); return; }
+  try {
+    const id = text.substring(0, 30).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/_+$/, "");
+    log(`Embedding text...`);
+    const t = performance.now();
+    const vecArr = await embed(text);
+    const embedTime = performance.now() - t;
+    const vec = new Float32Array(vecArr);
+    db.add(id, vec, { text });
+    vectors.set(id, { text });
+    log(`Added "${id}" (embedded in ${embedTime.toFixed(0)}ms)`);
+    updateInfo();
+    document.getElementById("add-text").value = "";
+  } catch (e) { log(`Error: ${e}`); }
+};
+
 window.addRandom = function() {
   const id = `rand_${randomCounter++}`;
-  const vec = new Float32Array(DIM);
-  for (let i = 0; i < DIM; i++) vec[i] = Math.random();
+  const vec = new Float32Array(dim);
+  for (let i = 0; i < dim; i++) vec[i] = Math.random();
   try {
     db.add(id, vec, { random: true });
     vectors.set(id, { vec: Array.from(vec), meta: { random: true } });
@@ -351,13 +670,31 @@ window.deleteVec = function(id) {
   } catch (e) { log(`Error: ${e}`); }
 };
 
-window.doSearch = function() {
-  const vecStr = document.getElementById("search-vec").value.trim();
+window.doSearch = async function() {
   const k = parseInt(document.getElementById("search-k").value) || 5;
-  if (!vecStr) { log("Error: query vector required"); return; }
+
+  let vec;
+  if (currentMode === "semantic") {
+    if (!embedder) { log("Error: load the AI model first"); return; }
+    const text = document.getElementById("search-text").value.trim();
+    if (!text) { log("Error: search query required"); return; }
+    const btn = document.getElementById("btn-search");
+    btn.disabled = true;
+    btn.textContent = "Embedding...";
+    try {
+      const vecArr = await embed(text);
+      vec = new Float32Array(vecArr);
+    } catch (e) { log(`Error embedding: ${e}`); btn.disabled = false; btn.textContent = "Search"; return; }
+    btn.disabled = false;
+    btn.textContent = "Search";
+  } else {
+    const vecStr = document.getElementById("search-vec").value.trim();
+    if (!vecStr) { log("Error: query vector required"); return; }
+    vec = new Float32Array(vecStr.split(",").map(Number));
+    if (vec.length !== dim) { log(`Error: expected ${dim} dimensions, got ${vec.length}`); return; }
+  }
+
   try {
-    const vec = new Float32Array(vecStr.split(",").map(Number));
-    if (vec.length !== DIM) { log(`Error: expected ${DIM} dimensions, got ${vec.length}`); return; }
     const t = performance.now();
     const results = db.search(vec, k);
     const elapsed = performance.now() - t;
@@ -366,11 +703,20 @@ window.doSearch = function() {
     if (results.length === 0) {
       el.innerHTML = '<span class="empty">No results</span>';
     } else {
-      let html = '<table><tr><th>#</th><th>ID</th><th>Distance</th><th>Metadata</th></tr>';
+      const metaCol = currentMode === "semantic" ? "Text" : "Metadata";
+      let html = `<table><tr><th>#</th><th>ID</th><th>Distance</th><th>${metaCol}</th></tr>`;
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         const meta = r.metadata;
-        html += `<tr><td>${i + 1}</td><td>${r.id}</td><td>${r.distance.toFixed(4)}</td><td>${meta ? JSON.stringify(meta) : ""}</td></tr>`;
+        let displayVal;
+        if (currentMode === "semantic" && meta) {
+          const parsed = typeof meta === "string" ? JSON.parse(meta) : meta;
+          const text = parsed.text || JSON.stringify(meta);
+          displayVal = `<span style="font-family:inherit">${text.substring(0, 80)}${text.length > 80 ? "..." : ""}</span>`;
+        } else {
+          displayVal = meta ? JSON.stringify(meta) : "";
+        }
+        html += `<tr><td>${i + 1}</td><td>${r.id}</td><td>${r.distance.toFixed(4)}</td><td>${displayVal}</td></tr>`;
         r.free();
       }
       html += '</table>';
@@ -383,7 +729,7 @@ window.doSearch = function() {
 
 function resetDbInner() {
   if (db) db.free();
-  db = new VctrsDatabase(DIM, "cosine");
+  db = new VctrsDatabase(dim, "cosine");
   vectors.clear();
   randomCounter = 0;
 }
@@ -393,6 +739,7 @@ window.resetDb = function() {
   currentSearches = [];
   showSuggested([]);
   document.getElementById("preset-desc").innerHTML = "";
+  document.getElementById("semantic-preset-desc").innerHTML = "";
   log("Database reset");
   updateInfo();
   document.getElementById("results").innerHTML = '<span class="empty">Load a preset and try a search</span>';
@@ -402,7 +749,7 @@ window.resetDb = function() {
 
 try {
   await init();
-  db = new VctrsDatabase(DIM, "cosine");
+  db = new VctrsDatabase(dim, "cosine");
   document.getElementById("status-tag").className = "tag tag-ready";
   document.getElementById("status-tag").textContent = "WASM Ready (220KB)";
   document.getElementById("app").style.display = "block";
