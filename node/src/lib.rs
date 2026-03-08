@@ -217,6 +217,14 @@ impl VctrsDatabase {
     }
 
     #[napi]
+    pub fn delete_many(&self, ids: Vec<String>) -> Result<u32> {
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        self.inner.delete_many(&id_refs)
+            .map(|n| n as u32)
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    #[napi]
     pub fn update(
         &self,
         id: String,

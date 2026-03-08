@@ -647,6 +647,30 @@ impl Database {
         Ok(true)
     }
 
+    /// Delete multiple vectors by ID. Returns the number of vectors actually deleted.
+    pub fn delete_many(&self, ids: &[&str]) -> Result<usize> {
+        let mut id_map = self.id_map.write();
+        let mut wal = self.wal.lock();
+        let mut index = self.index.write();
+        let mut reverse_map = self.reverse_map.write();
+        let mut meta_store = self.metadata.write();
+        let mut mi = self.meta_index.write();
+
+        let mut deleted = 0;
+        for id in ids {
+            if let Some(internal_id) = id_map.remove(*id) {
+                wal.append(&WalEntry::Delete { id: id.to_string() })?;
+                index.mark_deleted(internal_id);
+                reverse_map[internal_id as usize] = String::new();
+                mi.remove(internal_id, &meta_store[internal_id as usize]);
+                meta_store[internal_id as usize] = None;
+                deleted += 1;
+            }
+        }
+
+        Ok(deleted)
+    }
+
     pub fn update(
         &self,
         id: &str,

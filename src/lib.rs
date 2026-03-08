@@ -249,6 +249,13 @@ impl PyDatabase {
         })
     }
 
+    fn delete_many(&self, py: Python<'_>, ids: Vec<String>) -> PyResult<usize> {
+        let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        py.allow_threads(|| {
+            self.inner.delete_many(&id_refs).map_err(|e| PyValueError::new_err(e.to_string()))
+        })
+    }
+
     #[pyo3(signature = (id, vector = None, metadata = None))]
     fn update(
         &self,

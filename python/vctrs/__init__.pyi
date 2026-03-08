@@ -164,6 +164,14 @@ class AsyncDatabase:
         """
         ...
 
+    async def delete_many(self, ids: list[str]) -> int:
+        """Delete multiple vectors by ID.
+
+        Returns:
+            Number of vectors actually deleted.
+        """
+        ...
+
     async def update(
         self,
         id: str,

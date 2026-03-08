@@ -57,6 +57,9 @@ class AsyncDatabase:
     async def delete(self, id):
         return await asyncio.to_thread(self._db.delete, id)
 
+    async def delete_many(self, ids):
+        return await asyncio.to_thread(self._db.delete_many, ids)
+
     async def update(self, id, vector=None, metadata=None):
         return await asyncio.to_thread(
             partial(self._db.update, id, vector=vector, metadata=metadata)

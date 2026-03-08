@@ -1451,3 +1451,37 @@
         let filter = Filter::Gt("score".to_string(), 40.0);
         assert_eq!(db.count(Some(&filter)), 2);
     }
+
+    #[test]
+    fn test_delete_many() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("testdb");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        db.add("a", vec![1.0, 0.0], None).unwrap();
+        db.add("b", vec![0.0, 1.0], None).unwrap();
+        db.add("c", vec![0.5, 0.5], None).unwrap();
+        db.add("d", vec![0.3, 0.7], None).unwrap();
+        assert_eq!(db.len(), 4);
+
+        // Delete two existing and one non-existent.
+        let deleted = db.delete_many(&["a", "c", "nonexistent"]).unwrap();
+        assert_eq!(deleted, 2);
+        assert_eq!(db.len(), 2);
+        assert!(!db.contains("a"));
+        assert!(db.contains("b"));
+        assert!(!db.contains("c"));
+        assert!(db.contains("d"));
+    }
+
+    #[test]
+    fn test_delete_many_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("testdb");
+        let db = Database::open_or_create(path.to_str().unwrap(), 2, Metric::Cosine).unwrap();
+
+        db.add("a", vec![1.0, 0.0], None).unwrap();
+        let deleted = db.delete_many(&[]).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(db.len(), 1);
+    }

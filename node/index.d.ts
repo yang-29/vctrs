@@ -234,6 +234,18 @@ export declare class VctrsDatabase {
   delete(id: string): boolean
 
   /**
+   * Delete multiple vectors by ID.
+   *
+   * More efficient than calling `delete()` in a loop because
+   * locks are held once for the entire batch.
+   *
+   * @param ids - Array of vector IDs to delete.
+   * @returns Number of vectors actually deleted (missing IDs are skipped).
+   * @throws On internal errors (e.g. WAL write failure).
+   */
+  deleteMany(ids: Array<string>): number
+
+  /**
    * Update a vector's embedding and/or metadata in-place.
    *
    * @param id - The vector's unique identifier.

@@ -271,6 +271,23 @@ class Database:
         """
         ...
 
+    def delete_many(self, ids: list[str]) -> int:
+        """Delete multiple vectors by ID.
+
+        More efficient than calling :meth:`delete` in a loop because
+        locks are held once for the entire batch.
+
+        Args:
+            ids: List of vector IDs to delete.
+
+        Returns:
+            Number of vectors actually deleted (IDs not found are skipped).
+
+        Raises:
+            ValueError: On internal errors (e.g. WAL write failure).
+        """
+        ...
+
     def update(
         self,
         id: str,
