@@ -46,11 +46,7 @@ impl VctrsDatabase {
     #[wasm_bindgen(constructor)]
     pub fn new(dim: usize, metric: &str) -> Result<VctrsDatabase, JsValue> {
         let m = parse_metric(metric)?;
-        // Use a temp path — in WASM there's no filesystem, but Database
-        // needs a path for its internal storage struct. We never call save().
-        let db = Database::open_or_create("/vctrs_wasm_tmp", dim, m)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(VctrsDatabase { inner: db })
+        Ok(VctrsDatabase { inner: Database::in_memory(dim, m) })
     }
 
     /// Add a vector with a unique string ID and optional metadata.

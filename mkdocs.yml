@@ -1,5 +1,5 @@
 site_name: vctrs
-site_description: A fast embedded vector database. Rust core, Python and Node bindings.
+site_description: A fast embedded vector database. Rust core with Python, Node.js, and WebAssembly bindings.
 site_url: https://yang-29.github.io/vctrs/
 repo_url: https://github.com/yang-29/vctrs
 repo_name: yang-29/vctrs
@@ -88,6 +88,9 @@ nav:
     - GetResult: node/typedoc/Interface.GetResult.md
     - VctrsStats: node/typedoc/Interface.VctrsStats.md
     - WhereFilter: node/typedoc/TypeAlias.WhereFilter.md
+  - WebAssembly:
+    - Getting Started: wasm/index.md
+    - Interactive Demo: wasm/demo.md
   - Examples:
     - Semantic Search: examples/semantic-search.md
     - Deduplication: examples/dedup.md

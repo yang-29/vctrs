@@ -291,6 +291,22 @@ impl Database {
         Err(VctrsError::DatabaseNotFound(path.to_string()))
     }
 
+    /// Create a purely in-memory database (no filesystem, no WAL).
+    /// Useful for WASM and ephemeral use cases.
+    pub fn in_memory(dim: usize, metric: Metric) -> Self {
+        Database {
+            index: RwLock::new(HnswIndex::new(dim, metric, 16, 200)),
+            id_map: RwLock::new(HashMap::new()),
+            reverse_map: RwLock::new(Vec::new()),
+            metadata: RwLock::new(Vec::new()),
+            meta_index: RwLock::new(MetadataIndex::new()),
+            storage: Storage::new(&PathBuf::new(), dim),
+            dim,
+            quantize_on_save: false,
+            wal: Mutex::new(Wal::noop()),
+        }
+    }
+
     /// Open an existing database or create a new one.
     /// dim and metric are only used when creating — ignored when opening an existing db.
     pub fn open_or_create(path: &str, dim: usize, metric: Metric) -> Result<Self> {

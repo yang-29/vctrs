@@ -1,6 +1,6 @@
 # vctrs
 
-A fast embedded vector database. Rust core with Python and Node.js bindings.
+A fast embedded vector database. Rust core with Python, Node.js, and WebAssembly bindings.
 
 Vector search as a library, not a service. No server, no config.
 
@@ -16,6 +16,12 @@ Vector search as a library, not a service. No server, no config.
 
     ```bash
     npm install @yang-29/vctrs
+    ```
+
+=== "WebAssembly"
+
+    ```bash
+    npm install @yang-29/vctrs-wasm
     ```
 
 === "Rust"
@@ -53,6 +59,23 @@ Vector search as a library, not a service. No server, no config.
 
     for (const r of results) {
       console.log(r.id, r.distance, r.metadata);
+    }
+    ```
+
+=== "WebAssembly"
+
+    ```javascript
+    import init, { VctrsDatabase } from "@yang-29/vctrs-wasm";
+
+    await init();
+    const db = new VctrsDatabase(384, "cosine");
+
+    db.add("doc1", new Float32Array(vector), { title: "hello" });
+    const results = db.search(new Float32Array(queryVector), 10);
+
+    for (const r of results) {
+      console.log(r.id, r.distance, r.metadata);
+      r.free();
     }
     ```
 

@@ -54,6 +54,7 @@ fn crc32(data: &[u8]) -> u32 {
 pub struct Wal {
     path: PathBuf,
     writer: Option<BufWriter<File>>,
+    noop: bool,
 }
 
 impl Wal {
@@ -61,6 +62,16 @@ impl Wal {
         Wal {
             path: dir.join("wal.vctrs"),
             writer: None,
+            noop: false,
+        }
+    }
+
+    /// Create a no-op WAL that discards all writes (for in-memory / WASM usage).
+    pub fn noop() -> Self {
+        Wal {
+            path: PathBuf::new(),
+            writer: None,
+            noop: true,
         }
     }
 
@@ -78,6 +89,9 @@ impl Wal {
 
     /// Append an entry to the WAL.
     pub fn append(&mut self, entry: &WalEntry) -> io::Result<()> {
+        if self.noop {
+            return Ok(());
+        }
         let (op_type, payload) = serialize_entry(entry);
 
         // Checksum covers op_type + payload.
@@ -98,7 +112,7 @@ impl Wal {
     /// Read all entries from the WAL file. Skips corrupt entries at the end
     /// (partial writes from crashes).
     pub fn read_entries(&self) -> io::Result<Vec<WalEntry>> {
-        if !self.path.exists() {
+        if self.noop || !self.path.exists() {
             return Ok(Vec::new());
         }
 
@@ -161,6 +175,9 @@ impl Wal {
 
     /// Truncate the WAL (called after a successful snapshot/save).
     pub fn truncate(&mut self) -> io::Result<()> {
+        if self.noop {
+            return Ok(());
+        }
         // Close the writer first.
         self.writer = None;
         if self.path.exists() {
@@ -171,7 +188,7 @@ impl Wal {
 
     /// Whether the WAL file exists and has entries.
     pub fn has_entries(&self) -> bool {
-        self.path.exists() && fs::metadata(&self.path).map_or(false, |m| m.len() > 0)
+        !self.noop && self.path.exists() && fs::metadata(&self.path).map_or(false, |m| m.len() > 0)
     }
 }
 

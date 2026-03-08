@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head><title>vctrs WASM test</title></head>
+<body>
+<pre id="output"></pre>
+<script type="module">
+import init, { VctrsDatabase } from "./pkg/vctrs_wasm.js";
+
+const el = document.getElementById("output");
+const log = (msg) => { el.textContent += msg + "\n"; console.log(msg); };
+
+try {
+  await init();
+  log("WASM loaded");
+
+  // Create database
+  const db = new VctrsDatabase(4, "cosine");
+  log(`Created db: dim=${db.dim}, length=${db.length}`);
+
+  // Add vectors
+  db.add("cat", new Float32Array([1, 0, 0, 0]), { animal: "cat" });
+  db.add("dog", new Float32Array([0.9, 0.1, 0, 0]), { animal: "dog" });
+  db.add("fish", new Float32Array([0, 0, 1, 0]), { animal: "fish" });
+  db.add("bird", new Float32Array([0, 0, 0.1, 0.9]), { animal: "bird" });
+  log(`Added 4 vectors, length=${db.length}`);
+
+  // Search
+  const results = db.search(new Float32Array([1, 0, 0, 0]), 3);
+  log(`\nSearch for [1,0,0,0] k=3:`);
+  for (const r of results) {
+    log(`  ${r.id}: distance=${r.distance.toFixed(4)}, metadata=${JSON.stringify(r.metadata)}`);
+    r.free();
+  }
+
+  // Upsert
+  db.upsert("cat", new Float32Array([0.5, 0.5, 0, 0]), { animal: "cat", updated: true });
+  log(`\nUpserted cat, length=${db.length}`);
+
+  // Contains / delete
+  log(`contains("cat") = ${db.contains("cat")}`);
+  log(`delete("fish") = ${db.delete("fish")}`);
+  log(`length = ${db.length}`);
+  log(`contains("fish") = ${db.contains("fish")}`);
+
+  db.free();
+
+  // Performance test
+  const dim = 384;
+  const n = 1000;
+
+  const db2 = new VctrsDatabase(dim, "cosine");
+  const t1 = performance.now();
+  for (let i = 0; i < n; i++) {
+    const vec = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) vec[d] = Math.random();
+    db2.add(`v${i}`, vec, null);
+  }
+  const t2 = performance.now();
+  log(`\nInsert ${n}x${dim}: ${(t2 - t1).toFixed(1)}ms`);
+
+  const query = new Float32Array(dim);
+  for (let d = 0; d < dim; d++) query[d] = Math.random();
+  const iters = 100;
+  const t3 = performance.now();
+  for (let i = 0; i < iters; i++) {
+    const r = db2.search(query, 10);
+    for (const x of r) x.free();
+  }
+  const t4 = performance.now();
+  log(`Search ${iters}x k=10: ${((t4 - t3) / iters).toFixed(3)}ms/query`);
+
+  db2.free();
+
+  log("\n✅ All tests passed");
+} catch (e) {
+  log(`\n❌ Error: ${e}`);
+  console.error(e);
+}
+</script>
+</body>
+</html>

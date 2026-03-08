@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vctrs WASM Demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    font-family: Inter, system-ui, -apple-system, sans-serif;
+    margin: 0; padding: 24px;
+    background: #fafafa; color: #1a1a1a;
+    line-height: 1.5;
+  }
+  h2 { margin: 0 0 16px; font-size: 1.2rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 900px; }
+  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 8px;
+    padding: 16px;
+  }
+  label { display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 4px; color: #555; }
+  input, select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid #d0d0d0; border-radius: 6px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
+    background: #fafafa;
+  }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #7c4dff; }
+  textarea { resize: vertical; min-height: 60px; }
+  button {
+    padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 0.85rem; font-weight: 500; transition: background 0.15s;
+  }
+  .btn-primary { background: #7c4dff; color: #fff; }
+  .btn-primary:hover { background: #651fff; }
+  .btn-primary:disabled { background: #ccc; cursor: default; }
+  .btn-secondary { background: #f0f0f0; color: #333; }
+  .btn-secondary:hover { background: #e0e0e0; }
+  .btn-danger { background: #ff5252; color: #fff; }
+  .btn-danger:hover { background: #ff1744; }
+  .btn-row { display: flex; gap: 8px; margin-top: 10px; }
+  .status {
+    padding: 10px 14px; border-radius: 6px; font-size: 0.85rem;
+    font-family: 'JetBrains Mono', monospace; margin-top: 12px;
+    background: #f5f5f5; border: 1px solid #e0e0e0;
+    white-space: pre-wrap; max-height: 300px; overflow-y: auto;
+  }
+  .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.75rem; font-weight: 600; margin-bottom: 12px;
+  }
+  .tag-loading { background: #fff3e0; color: #e65100; }
+  .tag-ready { background: #e8f5e9; color: #2e7d32; }
+  .tag-error { background: #ffebee; color: #c62828; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 8px; }
+  th { text-align: left; padding: 6px 8px; border-bottom: 2px solid #e0e0e0; font-weight: 600; }
+  td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+  tr:hover td { background: #fafafa; }
+  .empty { color: #999; font-style: italic; padding: 12px 0; text-align: center; }
+  .stats { font-size: 0.8rem; color: #777; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<span class="tag tag-loading" id="status-tag">Loading WASM...</span>
+<div id="app" style="display:none">
+
+<div class="grid">
+  <!-- Left column: Add / Manage -->
+  <div>
+    <div class="card">
+      <h2>Add Vector</h2>
+      <label for="add-id">ID</label>
+      <input id="add-id" placeholder="e.g. doc1" />
+      <label for="add-vec" style="margin-top:8px">Vector (comma-separated)</label>
+      <input id="add-vec" placeholder="e.g. 0.1, 0.9, 0.3, 0.5" />
+      <label for="add-meta" style="margin-top:8px">Metadata (JSON, optional)</label>
+      <input id="add-meta" placeholder='e.g. {"category": "science"}' />
+      <div class="btn-row">
+        <button class="btn-primary" onclick="addVector()">Add</button>
+        <button class="btn-secondary" onclick="addRandom()">Add Random</button>
+        <button class="btn-secondary" onclick="addRandom10()">+10 Random</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Database</h2>
+      <div id="db-info">Empty</div>
+      <div class="btn-row">
+        <button class="btn-secondary" onclick="loadPreset()">Load Preset (colors)</button>
+        <button class="btn-danger" onclick="resetDb()">Reset</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Vectors</h2>
+      <div id="vector-list"><span class="empty">No vectors added yet</span></div>
+    </div>
+  </div>
+
+  <!-- Right column: Search -->
+  <div>
+    <div class="card">
+      <h2>Search</h2>
+      <label for="search-vec">Query Vector</label>
+      <input id="search-vec" placeholder="e.g. 0.1, 0.9, 0.3, 0.5" />
+      <label for="search-k" style="margin-top:8px">k (results)</label>
+      <input id="search-k" type="number" value="5" min="1" max="100" />
+      <div class="btn-row">
+        <button class="btn-primary" onclick="doSearch()">Search</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Results</h2>
+      <div id="results"><span class="empty">Run a search to see results</span></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Log</h2>
+      <div class="status" id="log"></div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script type="module">
+import init, { VctrsDatabase } from "./pkg/vctrs_wasm.js";
+
+const DIM = 4;
+let db;
+
+const logEl = document.getElementById("log");
+const log = (msg) => { logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+
+function updateInfo() {
+  document.getElementById("db-info").textContent = `${db.length} vectors, dim=${db.dim}`;
+  updateVectorList();
+}
+
+// Track vectors for display
+const vectors = new Map();
+
+function updateVectorList() {
+  const el = document.getElementById("vector-list");
+  if (vectors.size === 0) {
+    el.innerHTML = '<span class="empty">No vectors added yet</span>';
+    return;
+  }
+  let html = '<table><tr><th>ID</th><th>Vector</th><th></th></tr>';
+  for (const [id, v] of vectors) {
+    const short = `[${v.vec.slice(0, 4).map(x => x.toFixed(2)).join(", ")}${v.vec.length > 4 ? ", ..." : ""}]`;
+    html += `<tr><td>${id}</td><td>${short}</td><td><button class="btn-danger" style="padding:2px 8px;font-size:0.75rem" onclick="deleteVec('${id}')">x</button></td></tr>`;
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+window.addVector = function() {
+  const id = document.getElementById("add-id").value.trim();
+  const vecStr = document.getElementById("add-vec").value.trim();
+  const metaStr = document.getElementById("add-meta").value.trim();
+  if (!id || !vecStr) { log("Error: ID and vector required"); return; }
+  try {
+    const vec = new Float32Array(vecStr.split(",").map(Number));
+    if (vec.length !== DIM) { log(`Error: expected ${DIM} dimensions, got ${vec.length}`); return; }
+    const meta = metaStr ? JSON.parse(metaStr) : null;
+    db.add(id, vec, meta);
+    vectors.set(id, { vec: Array.from(vec), meta });
+    log(`Added "${id}"`);
+    updateInfo();
+    document.getElementById("add-id").value = "";
+    document.getElementById("add-vec").value = "";
+    document.getElementById("add-meta").value = "";
+  } catch (e) { log(`Error: ${e}`); }
+};
+
+let randomCounter = 0;
+window.addRandom = function() {
+  const id = `rand_${randomCounter++}`;
+  const vec = new Float32Array(DIM);
+  for (let i = 0; i < DIM; i++) vec[i] = Math.random();
+  try {
+    db.add(id, vec, { random: true });
+    vectors.set(id, { vec: Array.from(vec), meta: { random: true } });
+    log(`Added "${id}" = [${Array.from(vec).map(x => x.toFixed(3)).join(", ")}]`);
+    updateInfo();
+  } catch (e) { log(`Error: ${e}`); }
+};
+
+window.addRandom10 = function() {
+  const t = performance.now();
+  for (let i = 0; i < 10; i++) window.addRandom();
+  log(`(10 vectors in ${(performance.now() - t).toFixed(1)}ms)`);
+};
+
+window.deleteVec = function(id) {
+  try {
+    db.delete(id);
+    vectors.delete(id);
+    log(`Deleted "${id}"`);
+    updateInfo();
+  } catch (e) { log(`Error: ${e}`); }
+};
+
+window.doSearch = function() {
+  const vecStr = document.getElementById("search-vec").value.trim();
+  const k = parseInt(document.getElementById("search-k").value) || 5;
+  if (!vecStr) { log("Error: query vector required"); return; }
+  try {
+    const vec = new Float32Array(vecStr.split(",").map(Number));
+    if (vec.length !== DIM) { log(`Error: expected ${DIM} dimensions, got ${vec.length}`); return; }
+    const t = performance.now();
+    const results = db.search(vec, k);
+    const elapsed = performance.now() - t;
+
+    const el = document.getElementById("results");
+    if (results.length === 0) {
+      el.innerHTML = '<span class="empty">No results</span>';
+    } else {
+      let html = '<table><tr><th>Rank</th><th>ID</th><th>Distance</th><th>Metadata</th></tr>';
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        const meta = r.metadata;
+        html += `<tr><td>${i + 1}</td><td>${r.id}</td><td>${r.distance.toFixed(6)}</td><td>${meta ? JSON.stringify(meta) : ""}</td></tr>`;
+        r.free();
+      }
+      html += '</table>';
+      html += `<div class="stats">${results.length} results in ${elapsed.toFixed(3)}ms</div>`;
+      el.innerHTML = html;
+    }
+    log(`Search completed: ${results.length} results in ${elapsed.toFixed(3)}ms`);
+  } catch (e) { log(`Error: ${e}`); }
+};
+
+window.loadPreset = function() {
+  resetDbInner();
+  const colors = {
+    red:    [1, 0, 0, 0],
+    orange: [0.8, 0.5, 0, 0],
+    yellow: [0.7, 0.7, 0, 0],
+    green:  [0, 1, 0, 0],
+    blue:   [0, 0, 1, 0],
+    purple: [0.5, 0, 0.5, 0],
+    white:  [0.6, 0.6, 0.6, 0.6],
+    black:  [0.05, 0.05, 0.05, 0.05],
+  };
+  for (const [name, vec] of Object.entries(colors)) {
+    db.add(name, new Float32Array(vec), { type: "color" });
+    vectors.set(name, { vec, meta: { type: "color" } });
+  }
+  log("Loaded color preset (8 vectors)");
+  document.getElementById("search-vec").value = "0.9, 0.1, 0, 0";
+  updateInfo();
+};
+
+function resetDbInner() {
+  db.free();
+  db = new VctrsDatabase(DIM, "cosine");
+  vectors.clear();
+  randomCounter = 0;
+}
+
+window.resetDb = function() {
+  resetDbInner();
+  log("Database reset");
+  updateInfo();
+  document.getElementById("results").innerHTML = '<span class="empty">Run a search to see results</span>';
+};
+
+// Init
+try {
+  await init();
+  db = new VctrsDatabase(DIM, "cosine");
+  document.getElementById("status-tag").className = "tag tag-ready";
+  document.getElementById("status-tag").textContent = "WASM Ready (220KB)";
+  document.getElementById("app").style.display = "block";
+  log("vctrs WASM loaded successfully");
+  updateInfo();
+} catch (e) {
+  document.getElementById("status-tag").className = "tag tag-error";
+  document.getElementById("status-tag").textContent = `Error: ${e}`;
+}
+</script>
+</body>
+</html>
