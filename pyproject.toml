@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "vctrs"
-version = "0.2.1"
+version = "0.2.2"
 description = "A fast embedded vector database. Rust core, Python API. 4-10x faster than ChromaDB."
 requires-python = ">=3.9"
 license = {text = "MIT"}
