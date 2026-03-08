@@ -408,16 +408,18 @@ impl Database {
             return Err(VctrsError::DuplicateId(id.to_string()));
         }
 
+        // Hold index write lock while pushing metadata so search threads
+        // can't see the vector before its metadata is ready.
         let mut index = self.index.write();
         let internal_id = index.insert(vector);
-        drop(index); // Release index write lock as soon as possible.
-
-        id_map.insert(id.to_string(), internal_id);
-        drop(id_map); // Release id_map write lock.
 
         self.reverse_map.write().push(id.to_string());
         self.meta_index.write().index(internal_id, &metadata);
         self.metadata.write().push(metadata);
+
+        id_map.insert(id.to_string(), internal_id);
+        drop(index);
+        drop(id_map);
 
         Ok(())
     }
@@ -469,15 +471,17 @@ impl Database {
             return Ok(());
         }
 
-        let internal_id = self.index.write().insert(vector);
+        // Hold index write lock while pushing metadata so search threads
+        // can't see the vector before its metadata is ready.
+        let mut index = self.index.write();
+        let internal_id = index.insert(vector);
 
-        // Push metadata and reverse_map BEFORE exposing the id in id_map,
-        // so other threads can't see the id before its metadata is ready.
         self.reverse_map.write().push(id.to_string());
         self.meta_index.write().index(internal_id, &metadata);
         self.metadata.write().push(metadata);
 
         id_map.insert(id.to_string(), internal_id);
+        drop(index);
         drop(id_map);
 
         Ok(())
@@ -620,7 +624,10 @@ impl Database {
             return Ok(());
         }
 
-        let internal_ids = self.index.write().batch_insert(final_insert);
+        // Hold index write lock while pushing metadata so search threads
+        // can't see vectors before their metadata is ready.
+        let mut index = self.index.write();
+        let internal_ids = index.batch_insert(final_insert);
 
         let mut reverse_map = self.reverse_map.write();
         let mut metadata = self.metadata.write();
@@ -639,6 +646,7 @@ impl Database {
             metadata[internal_ids[i] as usize] = final_metas[i].clone();
         }
 
+        drop(index);
         Ok(())
     }
 
