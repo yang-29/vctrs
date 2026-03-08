@@ -127,8 +127,6 @@ jobs:
           pattern: wheels-*
           merge-multiple: true
           path: dist
+      - uses: astral-sh/setup-uv@v5
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
+        run: uv publish dist/*
