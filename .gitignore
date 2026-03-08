@@ -9,4 +9,5 @@ dist/
 node/node_modules/
 node/*.node
 site/
+wasm/pkg/
 .playwright-mcp/

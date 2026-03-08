@@ -8,6 +8,7 @@
 /// - Windows: OpenBLAS (install via vcpkg or conda)
 /// Without BLAS, falls back to per-vector SimSIMD (still fast, but ~4x slower than BLAS).
 
+#[cfg(feature = "simd")]
 use simsimd::SpatialSimilarity;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -110,26 +111,38 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
 /// Cosine distance: 1 - cosine_similarity(a, b)
 /// Returns 0.0 for identical directions, up to 2.0 for opposite.
 pub fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    match f32::cosine(a, b) {
-        Some(d) => d as f32,
-        None => cosine_distance_scalar(a, b),
+    #[cfg(feature = "simd")]
+    {
+        match f32::cosine(a, b) {
+            Some(d) => return d as f32,
+            None => {}
+        }
     }
+    cosine_distance_scalar(a, b)
 }
 
 /// Squared euclidean distance via SIMD.
 pub fn euclidean_distance_sq(a: &[f32], b: &[f32]) -> f32 {
-    match f32::sqeuclidean(a, b) {
-        Some(d) => d as f32,
-        None => euclidean_distance_sq_scalar(a, b),
+    #[cfg(feature = "simd")]
+    {
+        match f32::sqeuclidean(a, b) {
+            Some(d) => return d as f32,
+            None => {}
+        }
     }
+    euclidean_distance_sq_scalar(a, b)
 }
 
 /// Negative dot product (lower = more similar, consistent with distance ordering).
 pub fn neg_dot_product(a: &[f32], b: &[f32]) -> f32 {
-    match SpatialSimilarity::dot(a, b) {
-        Some(d) => -(d as f32),
-        None => -dot_scalar(a, b),
+    #[cfg(feature = "simd")]
+    {
+        match SpatialSimilarity::dot(a, b) {
+            Some(d) => return -(d as f32),
+            None => {}
+        }
     }
+    -dot_scalar(a, b)
 }
 
 /// Compute distance between two vectors using the given metric.
@@ -188,16 +201,20 @@ fn gemv_dot_products(query: &[f32], vectors: &[f32], dim: usize, n: usize) -> Ve
     dots
 }
 
-/// Fallback: per-vector SimSIMD dot products.
+/// Fallback: per-vector dot products (SimSIMD when available, scalar otherwise).
 #[cfg(not(has_blas))]
 fn gemv_dot_products(query: &[f32], vectors: &[f32], dim: usize, n: usize) -> Vec<f32> {
     let mut dots = Vec::with_capacity(n);
     for i in 0..n {
         let v = &vectors[i * dim..(i + 1) * dim];
-        match SpatialSimilarity::dot(query, v) {
-            Some(d) => dots.push(d as f32),
-            None => dots.push(dot_scalar(query, v)),
+        #[cfg(feature = "simd")]
+        {
+            match SpatialSimilarity::dot(query, v) {
+                Some(d) => { dots.push(d as f32); continue; }
+                None => {}
+            }
         }
+        dots.push(dot_scalar(query, v));
     }
     dots
 }

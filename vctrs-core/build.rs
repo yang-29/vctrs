@@ -1,6 +1,13 @@
 use std::process::Command;
 
 fn main() {
+    let target = std::env::var("TARGET").unwrap_or_default();
+
+    // No BLAS linking for WASM or other non-native targets.
+    if target.contains("wasm") || target.contains("emscripten") {
+        return;
+    }
+
     if cfg!(target_os = "macos") {
         // Apple Accelerate — always available on macOS.
         println!("cargo:rustc-link-lib=framework=Accelerate");

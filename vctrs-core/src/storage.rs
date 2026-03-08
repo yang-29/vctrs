@@ -17,6 +17,7 @@
 use crate::hnsw::HnswIndex;
 use crate::quantize::ScalarQuantizer;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+#[cfg(feature = "mmap")]
 use memmap2::Mmap;
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read as IoRead, Write as IoWrite};
@@ -131,14 +132,23 @@ impl Storage {
 
     /// Load graph + metadata with mmap'd vectors (instant vector access, zero-copy).
     /// If a quantized vectors file (vectors.sq8) exists, loads it for faster HNSW search.
+    /// When the mmap feature is disabled, vectors are read into memory instead.
     pub fn load(&self) -> io::Result<(HnswIndex, Vec<MetaRecord>)> {
-        // Memory-map vectors.
-        let vec_file = File::open(&self.vectors_path)?;
-        let vectors_mmap = unsafe { Mmap::map(&vec_file)? };
-
         // Read entire graph file at once for fast parsing.
         let graph_data = fs::read(&self.graph_path)?;
-        let (mut index, remaining) = HnswIndex::load_graph_mmap(&graph_data, vectors_mmap)?;
+
+        #[cfg(feature = "mmap")]
+        let (mut index, remaining) = {
+            let vec_file = File::open(&self.vectors_path)?;
+            let vectors_mmap = unsafe { Mmap::map(&vec_file)? };
+            HnswIndex::load_graph_mmap(&graph_data, vectors_mmap)?
+        };
+
+        #[cfg(not(feature = "mmap"))]
+        let (mut index, remaining) = {
+            let vectors_data = fs::read(&self.vectors_path)?;
+            HnswIndex::load_graph_owned(&graph_data, vectors_data)?
+        };
 
         // Load quantized vectors for search if available.
         if self.quantized_path.exists() {

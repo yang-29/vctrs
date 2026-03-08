@@ -7,15 +7,21 @@ description = "Core library for vctrs embedded vector database"
 [lib]
 name = "vctrs_core"
 
+[features]
+default = ["parallel", "simd", "mmap"]
+parallel = ["rayon"]
+simd = ["simsimd"]
+mmap = ["memmap2"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
 parking_lot = "0.12"
 byteorder = "1"
-simsimd = "6"
-rayon = "1"
-memmap2 = "0.9"
+simsimd = { version = "6", optional = true }
+rayon = { version = "1", optional = true }
+memmap2 = { version = "0.9", optional = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(has_blas)'] }

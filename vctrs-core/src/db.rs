@@ -6,6 +6,7 @@ use crate::hnsw::{GraphStats, HnswIndex};
 use crate::storage::{MetaRecord, Storage};
 use crate::wal::{Wal, WalEntry};
 use parking_lot::{Mutex, RwLock};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -807,8 +808,12 @@ impl Database {
             let resolved = f.resolve_from_index(&mi);
             drop(mi);
 
-            let results: Vec<Vec<SearchResult>> = queries
-                .par_iter()
+            #[cfg(feature = "parallel")]
+            let iter = queries.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let iter = queries.iter();
+
+            let results: Vec<Vec<SearchResult>> = iter
                 .map(|query| {
                     let raw = if let Some(ref match_set) = resolved {
                         index.search_filtered(query, k, ef, |id| {
