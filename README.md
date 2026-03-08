@@ -1,6 +1,6 @@
 # vctrs
 
-A fast embedded vector database. Rust core with Python and Node bindings.
+A fast embedded vector database. Rust core with Python, Node.js, and WebAssembly bindings.
 
 Vector search as a library, not a service. No server, no config. `pip install vctrs` and go.
 
@@ -16,8 +16,9 @@ ChromaDB, Pinecone, and Qdrant are databases you run. vctrs is a library you emb
 ## Install
 
 ```bash
-pip install vctrs        # Python
-npm install @yang-29/vctrs  # Node
+pip install vctrs              # Python
+npm install @yang-29/vctrs     # Node
+npm install @yang-29/vctrs-wasm  # Browser (WASM)
 ```
 
 ## Python
@@ -141,6 +142,28 @@ Multiple keys in a filter object are ANDed together.
 - PyO3 + maturin for zero-copy Python/numpy bindings
 
 </details>
+
+## WebAssembly
+
+Runs in the browser — no server, no backend. ~220KB.
+
+```javascript
+import init, { VctrsDatabase } from "@yang-29/vctrs-wasm";
+
+await init();
+
+const db = new VctrsDatabase(384, "cosine");
+
+db.add("doc1", new Float32Array(vector), { title: "hello" });
+const results = db.search(new Float32Array(query), 10);
+for (const r of results) {
+  console.log(r.id, r.distance, r.metadata);
+  r.free(); // free WASM memory
+}
+db.free();
+```
+
+In-memory only (no persistence). Call `.free()` on results and the database to avoid leaks.
 
 ## Rust
 
