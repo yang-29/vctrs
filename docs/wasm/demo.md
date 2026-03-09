@@ -2,7 +2,7 @@
 
 Try vctrs in the browser. Everything below runs client-side via WebAssembly — no server, no network requests.
 
-<iframe src="../demo.html" width="100%" height="950" frameborder="0" style="border: 1px solid #e0e0e0; border-radius: 8px;"></iframe>
+<iframe src="../demo.html" width="100%" height="1400" frameborder="0" style="border: 1px solid #e0e0e0; border-radius: 8px;"></iframe>
 
 ## Two modes
 
