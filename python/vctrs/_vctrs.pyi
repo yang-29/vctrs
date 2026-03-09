@@ -426,3 +426,113 @@ class Database:
     ) -> bool:
         """Context manager exit — auto-saves the database."""
         ...
+
+    def export_json(self, path: str, pretty: bool = False) -> None:
+        """Export all vectors and metadata to a JSON file.
+
+        Args:
+            path: File path to write the JSON export.
+            pretty: If ``True``, pretty-print the JSON output.
+        """
+        ...
+
+    def import_json(self, path: str) -> None:
+        """Import vectors from a JSON file (upsert semantics).
+
+        Updates existing IDs and inserts new ones.
+
+        Args:
+            path: File path to read the JSON export from.
+
+        Raises:
+            ValueError: If the JSON dimension doesn't match.
+        """
+        ...
+
+
+class Client:
+    """Multi-collection client for managing named vector databases.
+
+    Each collection is stored in its own subdirectory under the root path.
+
+    Args:
+        path: Root directory for all collections.
+
+    Example::
+
+        client = Client("/data/vectors")
+        movies = client.create_collection("movies", dim=384)
+        docs = client.get_or_create_collection("docs", dim=768)
+        print(client.list_collections())  # ["docs", "movies"]
+    """
+
+    def __init__(self, path: str) -> None: ...
+
+    def create_collection(
+        self,
+        name: str,
+        dim: int,
+        metric: Optional[str] = None,
+        m: Optional[int] = None,
+        ef_construction: Optional[int] = None,
+        quantize: bool = False,
+    ) -> Database:
+        """Create a new collection.
+
+        Args:
+            name: Collection name (alphanumeric, hyphens, underscores).
+            dim: Vector dimensionality.
+            metric: Distance metric (default ``"cosine"``).
+            m: HNSW M parameter (default 16).
+            ef_construction: HNSW build-time width (default 200).
+            quantize: Enable SQ8 quantization.
+
+        Raises:
+            ValueError: If the collection already exists or the name
+                is invalid.
+        """
+        ...
+
+    def get_collection(self, name: str) -> Database:
+        """Open an existing collection.
+
+        Args:
+            name: Collection name.
+
+        Raises:
+            ValueError: If the collection doesn't exist.
+        """
+        ...
+
+    def get_or_create_collection(
+        self,
+        name: str,
+        dim: int,
+        metric: Optional[str] = None,
+    ) -> Database:
+        """Get or create a collection.
+
+        If the collection exists, opens it (dim/metric are ignored).
+        Otherwise creates a new one.
+
+        Args:
+            name: Collection name.
+            dim: Vector dimensionality (used only for creation).
+            metric: Distance metric (used only for creation).
+        """
+        ...
+
+    def delete_collection(self, name: str) -> bool:
+        """Delete a collection and all its data.
+
+        Args:
+            name: Collection name.
+
+        Returns:
+            ``True`` if the collection existed and was deleted.
+        """
+        ...
+
+    def list_collections(self) -> list[str]:
+        """List all collection names (sorted alphabetically)."""
+        ...

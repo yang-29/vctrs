@@ -1,4 +1,4 @@
-from vctrs._vctrs import Database, SearchResult
+from vctrs._vctrs import Database, SearchResult, Client
 
 import asyncio
 from functools import partial
@@ -121,5 +121,5 @@ class AsyncDatabase:
         return False
 
 
-__all__ = ["Database", "AsyncDatabase", "SearchResult"]
+__all__ = ["Database", "AsyncDatabase", "SearchResult", "Client"]
 __version__ = "0.2.0"

@@ -65,6 +65,36 @@ with Database("./mydb", dim=384) as db:
 
 Options: `m=16` (HNSW links), `ef_construction=200` (build quality), `quantize=True` (SQ8, ~4x smaller on disk).
 
+### Collections
+
+```python
+from vctrs import Client
+
+client = Client("./data")
+
+# Create isolated collections with different configs
+movies = client.create_collection("movies", dim=384)
+docs = client.create_collection("docs", dim=768, metric="dot")
+
+movies.add("m1", vector, {"title": "Alien"})
+movies.save()
+
+# List, get, delete
+client.list_collections()       # → ["docs", "movies"]
+db = client.get_collection("movies")
+client.delete_collection("docs")
+```
+
+### Export / Import
+
+```python
+# Backup to JSON
+db.export_json("backup.json", pretty=True)
+
+# Restore into an existing database (upsert semantics)
+db.import_json("backup.json")
+```
+
 ## Node
 
 ```javascript
@@ -101,6 +131,27 @@ const stats = db.stats(); // → { numVectors, numDeleted, avgDegreeLayer0, ... 
 ```
 
 Metrics: `"cosine"` (default), `"euclidean"` / `"l2"`, `"dot"` / `"dot_product"`.
+
+### Collections
+
+```javascript
+const { VctrsClient } = require("@yang-29/vctrs");
+
+const client = new VctrsClient("./data");
+
+const movies = client.createCollection("movies", 384);
+const docs = client.getOrCreateCollection("docs", 768, "dot");
+
+client.listCollections(); // → ["docs", "movies"]
+client.deleteCollection("docs");
+```
+
+### Export / Import
+
+```javascript
+db.exportJson("backup.json", true); // pretty-print
+db.importJson("backup.json");       // upsert semantics
+```
 
 ### Filter operators
 
@@ -200,6 +251,36 @@ let db = Database::open_or_create_with_config("./mydb", 384, Metric::Cosine, con
 ```
 
 Errors are typed via `VctrsError` enum (`DimensionMismatch`, `DuplicateId`, `NotFound`, `Io`, etc.).
+
+### Collections
+
+```rust
+use vctrs_core::client::Client;
+use vctrs_core::distance::Metric;
+
+let client = Client::new("./data")?;
+let movies = client.create_collection("movies", 384, Metric::Cosine)?;
+let docs = client.get_or_create_collection("docs", 768, Metric::DotProduct)?;
+
+client.list_collections()?;       // → ["docs", "movies"]
+client.delete_collection("docs")?;
+```
+
+### Export / Import
+
+```rust
+// Export
+let file = std::fs::File::create("backup.json")?;
+db.export_json(file)?;
+
+// Import into new database
+let file = std::fs::File::open("backup.json")?;
+let db = Database::import_json(file, "./restored")?;
+
+// Import into existing database (upsert)
+let file = std::fs::File::open("backup.json")?;
+db.import_json_into(file)?;
+```
 
 ## Examples
 

@@ -435,6 +435,29 @@ impl PyDatabase {
             Metric::DotProduct => "dot_product",
         }
     }
+
+    /// Export all vectors and metadata to a JSON file.
+    #[pyo3(signature = (path, pretty = false))]
+    fn export_json(&self, path: &str, pretty: bool) -> PyResult<()> {
+        let file = std::fs::File::create(path)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let writer = std::io::BufWriter::new(file);
+        if pretty {
+            self.inner.export_json_pretty(writer)
+        } else {
+            self.inner.export_json(writer)
+        }
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// Import vectors from a JSON file into this database (upsert semantics).
+    fn import_json(&self, path: &str) -> PyResult<()> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let reader = std::io::BufReader::new(file);
+        self.inner.import_json_into(reader)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
 }
 
 // -- Filter parsing from Python dicts -----------------------------------------
@@ -569,9 +592,93 @@ fn json_to_pyobject(py: Python<'_>, value: &serde_json::Value) -> PyObject {
     json_module.call_method1("loads", (json_str,)).unwrap().to_object(py)
 }
 
+// -- Client (multi-collection) ------------------------------------------------
+
+#[pyclass(name = "Client")]
+struct PyClient {
+    inner: vctrs_core::client::Client,
+}
+
+#[pymethods]
+impl PyClient {
+    #[new]
+    fn new(path: &str) -> PyResult<Self> {
+        let client = vctrs_core::client::Client::new(path)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PyClient { inner: client })
+    }
+
+    /// Create a new collection. Fails if it already exists.
+    #[pyo3(signature = (name, dim, metric = None, m = None, ef_construction = None, quantize = false))]
+    fn create_collection(
+        &self,
+        name: &str,
+        dim: usize,
+        metric: Option<&str>,
+        m: Option<usize>,
+        ef_construction: Option<usize>,
+        quantize: bool,
+    ) -> PyResult<PyDatabase> {
+        let metric_enum = parse_metric(metric.unwrap_or("cosine"))?;
+        let config = HnswConfig {
+            m: m.unwrap_or(16),
+            ef_construction: ef_construction.unwrap_or(200),
+            quantize,
+        };
+        let db = self.inner.create_collection_with_config(name, dim, metric_enum, config)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PyDatabase { inner: db })
+    }
+
+    /// Get an existing collection by name.
+    fn get_collection(&self, name: &str) -> PyResult<PyDatabase> {
+        let db = self.inner.get_collection(name)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PyDatabase { inner: db })
+    }
+
+    /// Get or create a collection.
+    #[pyo3(signature = (name, dim, metric = None))]
+    fn get_or_create_collection(
+        &self,
+        name: &str,
+        dim: usize,
+        metric: Option<&str>,
+    ) -> PyResult<PyDatabase> {
+        let metric_enum = parse_metric(metric.unwrap_or("cosine"))?;
+        let db = self.inner.get_or_create_collection(name, dim, metric_enum)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PyDatabase { inner: db })
+    }
+
+    /// Delete a collection and all its data.
+    fn delete_collection(&self, name: &str) -> PyResult<bool> {
+        self.inner.delete_collection(name)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// List all collection names.
+    fn list_collections(&self) -> PyResult<Vec<String>> {
+        self.inner.list_collections()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
+fn parse_metric(s: &str) -> PyResult<Metric> {
+    match s {
+        "cosine" => Ok(Metric::Cosine),
+        "euclidean" | "l2" => Ok(Metric::Euclidean),
+        "dot" | "dot_product" => Ok(Metric::DotProduct),
+        _ => Err(PyValueError::new_err(
+            "metric must be 'cosine', 'euclidean'/'l2', or 'dot'/'dot_product'"
+        )),
+    }
+}
+
 #[pymodule]
 fn _vctrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDatabase>()?;
     m.add_class::<PySearchResult>()?;
+    m.add_class::<PyClient>()?;
     Ok(())
 }

@@ -6,6 +6,12 @@
     options:
       show_source: false
 
+## Client
+
+::: vctrs.Client
+    options:
+      show_source: false
+
 ## AsyncDatabase
 
 ::: vctrs.AsyncDatabase

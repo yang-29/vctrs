@@ -368,4 +368,96 @@ export declare class VctrsDatabase {
 
   /** Async version of `delete()`. */
   deleteAsync(id: string): Promise<boolean>
+
+  /**
+   * Export all vectors and metadata to a JSON file.
+   *
+   * @param path - File path to write the JSON export.
+   * @param pretty - If true, pretty-print the JSON (default false).
+   */
+  exportJson(path: string, pretty?: boolean | undefined | null): void
+
+  /**
+   * Import vectors from a JSON file (upsert semantics).
+   *
+   * Updates existing IDs and inserts new ones.
+   *
+   * @param path - File path to read the JSON export from.
+   * @throws If the JSON dimension doesn't match.
+   */
+  importJson(path: string): void
+}
+
+/**
+ * Multi-collection client for managing named vector databases.
+ *
+ * Each collection is stored in its own subdirectory under the root path.
+ *
+ * @example
+ * ```typescript
+ * const client = new VctrsClient("./data");
+ * const movies = client.createCollection("movies", 384);
+ * const docs = client.getOrCreateCollection("docs", 768);
+ * console.log(client.listCollections()); // ["docs", "movies"]
+ * ```
+ */
+export declare class VctrsClient {
+  /**
+   * Create a new client rooted at the given directory.
+   *
+   * @param path - Root directory for all collections.
+   */
+  constructor(path: string)
+
+  /**
+   * Create a new collection.
+   *
+   * @param name - Collection name (alphanumeric, hyphens, underscores).
+   * @param dim - Vector dimensionality.
+   * @param metric - Distance metric (default "cosine").
+   * @param hnswM - Max edges per HNSW node (default 16).
+   * @param efConstruction - Build-time search width (default 200).
+   * @param quantize - Enable SQ8 quantization (default false).
+   * @throws If the collection already exists or the name is invalid.
+   */
+  createCollection(
+    name: string,
+    dim: number,
+    metric?: string | undefined | null,
+    hnswM?: number | undefined | null,
+    efConstruction?: number | undefined | null,
+    quantize?: boolean | undefined | null,
+  ): VctrsDatabase
+
+  /**
+   * Open an existing collection.
+   *
+   * @param name - Collection name.
+   * @throws If the collection doesn't exist.
+   */
+  getCollection(name: string): VctrsDatabase
+
+  /**
+   * Get or create a collection.
+   *
+   * If the collection exists, opens it (dim/metric are ignored).
+   * Otherwise creates a new one.
+   */
+  getOrCreateCollection(
+    name: string,
+    dim: number,
+    metric?: string | undefined | null,
+  ): VctrsDatabase
+
+  /**
+   * Delete a collection and all its data.
+   *
+   * @returns `true` if the collection existed and was deleted.
+   */
+  deleteCollection(name: string): boolean
+
+  /**
+   * List all collection names (sorted alphabetically).
+   */
+  listCollections(): Array<string>
 }

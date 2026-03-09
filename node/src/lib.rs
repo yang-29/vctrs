@@ -651,6 +651,121 @@ impl Task for DeleteTask {
     }
 }
 
+// -- Export / Import ----------------------------------------------------------
+
+#[napi]
+impl VctrsDatabase {
+    /// Export all vectors and metadata to a JSON file.
+    #[napi]
+    pub fn export_json(&self, path: String, pretty: Option<bool>) -> Result<()> {
+        let file = std::fs::File::create(&path)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let writer = std::io::BufWriter::new(file);
+        if pretty.unwrap_or(false) {
+            self.inner.export_json_pretty(writer)
+        } else {
+            self.inner.export_json(writer)
+        }
+        .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Import vectors from a JSON file into this database (upsert semantics).
+    #[napi]
+    pub fn import_json(&self, path: String) -> Result<()> {
+        let file = std::fs::File::open(&path)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let reader = std::io::BufReader::new(file);
+        self.inner.import_json_into(reader)
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+}
+
+// -- Client (multi-collection) ------------------------------------------------
+
+#[napi]
+pub struct VctrsClient {
+    inner: vctrs_core::client::Client,
+}
+
+#[napi]
+impl VctrsClient {
+    #[napi(constructor)]
+    pub fn new(path: String) -> Result<Self> {
+        let client = vctrs_core::client::Client::new(&path)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(VctrsClient { inner: client })
+    }
+
+    /// Create a new collection. Fails if it already exists.
+    #[napi]
+    pub fn create_collection(
+        &self,
+        name: String,
+        dim: u32,
+        metric: Option<String>,
+        hnsw_m: Option<u32>,
+        ef_construction: Option<u32>,
+        quantize: Option<bool>,
+    ) -> Result<VctrsDatabase> {
+        let m = parse_metric_str(metric.as_deref().unwrap_or("cosine"))?;
+        let config = HnswConfig {
+            m: hnsw_m.unwrap_or(16) as usize,
+            ef_construction: ef_construction.unwrap_or(200) as usize,
+            quantize: quantize.unwrap_or(false),
+        };
+        let db = self.inner.create_collection_with_config(&name, dim as usize, m, config)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(VctrsDatabase { inner: Arc::new(db) })
+    }
+
+    /// Get an existing collection by name.
+    #[napi]
+    pub fn get_collection(&self, name: String) -> Result<VctrsDatabase> {
+        let db = self.inner.get_collection(&name)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(VctrsDatabase { inner: Arc::new(db) })
+    }
+
+    /// Get or create a collection.
+    #[napi]
+    pub fn get_or_create_collection(
+        &self,
+        name: String,
+        dim: u32,
+        metric: Option<String>,
+    ) -> Result<VctrsDatabase> {
+        let m = parse_metric_str(metric.as_deref().unwrap_or("cosine"))?;
+        let db = self.inner.get_or_create_collection(&name, dim as usize, m)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(VctrsDatabase { inner: Arc::new(db) })
+    }
+
+    /// Delete a collection and all its data.
+    #[napi]
+    pub fn delete_collection(&self, name: String) -> Result<bool> {
+        self.inner.delete_collection(&name)
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// List all collection names.
+    #[napi]
+    pub fn list_collections(&self) -> Result<Vec<String>> {
+        self.inner.list_collections()
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+}
+
+fn parse_metric_str(s: &str) -> Result<Metric> {
+    match s {
+        "cosine" => Ok(Metric::Cosine),
+        "euclidean" | "l2" => Ok(Metric::Euclidean),
+        "dot" | "dot_product" => Ok(Metric::DotProduct),
+        other => Err(Error::from_reason(format!(
+            "metric must be 'cosine', 'euclidean'/'l2', or 'dot'/'dot_product', got '{}'", other
+        ))),
+    }
+}
+
 // -- Filter parsing -----------------------------------------------------------
 
 /// Parse a JS filter object into a Filter.

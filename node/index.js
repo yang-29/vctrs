@@ -310,6 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { VctrsDatabase } = nativeBinding
+const { VctrsDatabase, VctrsClient } = nativeBinding
 
 module.exports.VctrsDatabase = VctrsDatabase
+module.exports.VctrsClient = VctrsClient

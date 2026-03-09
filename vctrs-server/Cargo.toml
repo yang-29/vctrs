@@ -1,0 +1,19 @@
+[package]
+name = "vctrs-server"
+version = "0.3.0"
+edition = "2021"
+description = "HTTP server for vctrs vector database"
+
+[[bin]]
+name = "vctrs-server"
+path = "src/main.rs"
+
+[dependencies]
+vctrs-core = { path = "../vctrs-core" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["cors"] }
+clap = { version = "4", features = ["derive"] }
+parking_lot = "0.12"

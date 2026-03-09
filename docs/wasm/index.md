@@ -93,7 +93,7 @@ Throws if `id` already exists. Use `upsert` to insert-or-update.
 
 Insert a new vector or update an existing one.
 
-### `db.search(vector, k)`
+### `db.search(vector, k, filter?, maxDistance?)`
 
 Find the `k` nearest neighbors. Returns an array of `SearchResult` objects.
 
@@ -101,6 +101,31 @@ Find the `k` nearest neighbors. Returns an array of `SearchResult` objects.
 |-----------|------|-------------|
 | `vector` | `Float32Array` | Query vector of length `dim` |
 | `k` | `number` | Number of results |
+| `filter` | `object \| null` | Optional metadata filter (same syntax as Python/Node) |
+| `maxDistance` | `number \| null` | Optional distance threshold |
+
+### `db.addMany(ids, vectors, dim, metadatas?)`
+
+Batch add multiple vectors. `vectors` is a flat `Float32Array` of length `ids.length * dim`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ids` | `string[]` | Array of unique IDs |
+| `vectors` | `Float32Array` | Flat array of all vectors concatenated |
+| `dim` | `number` | Vector dimensionality |
+| `metadatas` | `object[] \| null` | Optional array of metadata objects |
+
+### `db.get(id)`
+
+Retrieve a vector and its metadata. Returns `{ vector: Float32Array, metadata: object | null }`.
+
+### `db.ids()`
+
+Return all vector IDs as an array of strings.
+
+### `db.count(filter?)`
+
+Count vectors, optionally with a metadata filter.
 
 ### `db.delete(id)`
 
@@ -117,6 +142,25 @@ Number of vectors in the database.
 ### `db.dim` (getter)
 
 Vector dimensionality.
+
+### `db.export_json()`
+
+Export all vectors and metadata as a JSON string.
+
+```javascript
+const json = db.export_json();
+// Save to file, localStorage, IndexedDB, etc.
+localStorage.setItem("vectors_backup", json);
+```
+
+### `db.import_json(json)`
+
+Import vectors from a JSON string (upsert semantics).
+
+```javascript
+const json = localStorage.getItem("vectors_backup");
+db.import_json(json);
+```
 
 ### `SearchResult`
 
@@ -142,13 +186,10 @@ Vector dimensionality.
 
 The WASM build runs entirely in-memory. It does not support:
 
-- **Persistence** — no `save()` / `load()`. Data is lost on page refresh.
-- **Filtered search** — no `where` parameter on `search()`.
-- **Batch operations** — no `addMany()` / `searchMany()`.
+- **Persistence** — no `save()` / `load()`. Data is lost on page refresh. Use `export_json()` / `import_json()` with localStorage or IndexedDB for client-side persistence.
 - **Async** — all operations are synchronous (but fast).
 - **BLAS acceleration** — uses pure-Rust math (still fast for moderate dataset sizes).
-
-These may be added in future releases.
+- **Parallel search** — no `searchMany()` (WASM is single-threaded).
 
 ## Performance
 

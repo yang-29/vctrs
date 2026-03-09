@@ -77,3 +77,42 @@ db.add_many([f"doc{i}" for i in range(100)], batch)
 | `m` | `16` | HNSW edges per node (higher = better recall, more memory) |
 | `ef_construction` | `200` | Build-time search width (higher = better index quality) |
 | `quantize` | `False` | Enable SQ8 scalar quantization |
+
+## Collections
+
+Manage multiple isolated indexes under one directory:
+
+```python
+from vctrs import Client
+
+client = Client("./data")
+
+# Create collections with different configs
+movies = client.create_collection("movies", dim=384)
+docs = client.create_collection("docs", dim=768, metric="dot")
+
+# Use them like regular databases
+movies.add("m1", vector, {"title": "Alien"})
+movies.save()
+
+# List, get, delete
+client.list_collections()        # → ["docs", "movies"]
+db = client.get_collection("movies")
+db = client.get_or_create_collection("items", dim=384)
+client.delete_collection("docs")
+```
+
+## Export / Import
+
+Backup and restore databases as JSON:
+
+```python
+# Export to file
+db.export_json("backup.json")
+db.export_json("backup.json", pretty=True)  # human-readable
+
+# Import into existing database (upsert semantics)
+db.import_json("backup.json")
+```
+
+The JSON format includes dimension, metric, and all vectors with metadata.

@@ -20,6 +20,10 @@ pub enum VctrsError {
     CorruptData(String),
     /// Invalid filter value or operator.
     InvalidFilter(String),
+    /// Collection already exists.
+    CollectionExists(String),
+    /// Invalid collection name.
+    InvalidCollectionName(String),
 }
 
 impl fmt::Display for VctrsError {
@@ -41,6 +45,12 @@ impl fmt::Display for VctrsError {
             }
             VctrsError::CorruptData(msg) => write!(f, "corrupt data: {}", msg),
             VctrsError::InvalidFilter(msg) => write!(f, "invalid filter: {}", msg),
+            VctrsError::CollectionExists(name) => {
+                write!(f, "collection '{}' already exists", name)
+            }
+            VctrsError::InvalidCollectionName(msg) => {
+                write!(f, "invalid collection name: {}", msg)
+            }
         }
     }
 }

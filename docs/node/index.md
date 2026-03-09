@@ -64,3 +64,42 @@ console.log(db.dim, db.metric); // 384, "cosine"
 | `hnswM` | `16` | HNSW edges per node |
 | `efConstruction` | `200` | Build-time search width |
 | `quantize` | `false` | Enable SQ8 scalar quantization |
+
+## Collections
+
+Manage multiple isolated indexes under one directory:
+
+```typescript
+import { VctrsClient } from "@yang-29/vctrs";
+
+const client = new VctrsClient("./data");
+
+// Create collections with different configs
+const movies = client.createCollection("movies", 384);
+const docs = client.createCollection("docs", 768, "dot");
+
+// Use them like regular databases
+movies.add("m1", vector, { title: "Alien" });
+movies.save();
+
+// List, get, delete
+client.listCollections();            // → ["docs", "movies"]
+const db = client.getCollection("movies");
+const items = client.getOrCreateCollection("items", 384);
+client.deleteCollection("docs");
+```
+
+## Export / Import
+
+Backup and restore databases as JSON:
+
+```typescript
+// Export to file
+db.exportJson("backup.json");
+db.exportJson("backup.json", true);  // pretty-print
+
+// Import into existing database (upsert semantics)
+db.importJson("backup.json");
+```
+
+The JSON format includes dimension, metric, and all vectors with metadata.

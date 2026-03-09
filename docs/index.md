@@ -128,3 +128,65 @@ ChromaDB, Pinecone, and Qdrant are databases you run. vctrs is a library you emb
 | `$lte` | Less or equal | `{ field: { $lte: 20 } }` |
 
 Multiple keys in a filter are ANDed together.
+
+## Collections
+
+Manage multiple isolated indexes in one directory:
+
+=== "Python"
+
+    ```python
+    from vctrs import Client
+
+    client = Client("./data")
+    movies = client.create_collection("movies", dim=384)
+    docs = client.get_or_create_collection("docs", dim=768, metric="dot")
+
+    client.list_collections()  # → ["docs", "movies"]
+    ```
+
+=== "Node.js"
+
+    ```typescript
+    import { VctrsClient } from "@yang-29/vctrs";
+
+    const client = new VctrsClient("./data");
+    const movies = client.createCollection("movies", 384);
+    const docs = client.getOrCreateCollection("docs", 768, "dot");
+
+    client.listCollections();  // → ["docs", "movies"]
+    ```
+
+=== "Rust"
+
+    ```rust
+    use vctrs_core::client::Client;
+
+    let client = Client::new("./data")?;
+    let movies = client.create_collection("movies", 384, Metric::Cosine)?;
+    ```
+
+## Export / Import
+
+Backup and restore databases as JSON:
+
+=== "Python"
+
+    ```python
+    db.export_json("backup.json", pretty=True)
+    db.import_json("backup.json")  # upsert semantics
+    ```
+
+=== "Node.js"
+
+    ```typescript
+    db.exportJson("backup.json", true);
+    db.importJson("backup.json");
+    ```
+
+=== "WebAssembly"
+
+    ```javascript
+    const json = db.export_json();     // → JSON string
+    db.import_json(jsonString);        // upsert semantics
+    ```
