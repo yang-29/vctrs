@@ -2,8 +2,24 @@ use napi::bindgen_prelude::*;
 use napi::Task;
 use napi_derive::napi;
 use std::sync::Arc;
-use vctrs_core::db::{Database, Filter, HnswConfig};
+use vctrs_core::db::{Database, HnswConfig};
 use vctrs_core::distance::Metric;
+use vctrs_core::filter::Filter;
+
+/// Convert JS f64 vector to Rust f32.
+fn to_f32(v: Vec<f64>) -> Vec<f32> {
+    v.into_iter().map(|x| x as f32).collect()
+}
+
+/// Convert JS f64 vectors to Rust f32.
+fn to_f32_batch(vs: Vec<Vec<f64>>) -> Vec<Vec<f32>> {
+    vs.into_iter().map(to_f32).collect()
+}
+
+/// Convert Rust f32 vector to JS f64.
+fn to_f64(v: Vec<f32>) -> Vec<f64> {
+    v.into_iter().map(|x| x as f64).collect()
+}
 
 #[napi(object)]
 pub struct SearchResult {
@@ -52,14 +68,8 @@ impl VctrsDatabase {
         }
 
         let dim = dim.unwrap();
-        let m = match metric.as_deref().unwrap_or("cosine") {
-            "cosine" => Metric::Cosine,
-            "euclidean" | "l2" => Metric::Euclidean,
-            "dot" | "dot_product" => Metric::DotProduct,
-            other => return Err(Error::from_reason(format!(
-                "metric must be 'cosine', 'euclidean'/'l2', or 'dot'/'dot_product', got '{}'", other
-            ))),
-        };
+        let m = Metric::from_str(metric.as_deref().unwrap_or("cosine"))
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         let config = HnswConfig {
             m: hnsw_m.unwrap_or(16) as usize,
@@ -77,16 +87,14 @@ impl VctrsDatabase {
 
     #[napi]
     pub fn add(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> Result<()> {
-        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
-        self.inner.add(&id, vec_f32, metadata)
+        self.inner.add(&id, to_f32(vector), metadata)
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
     /// Add or update a vector.
     #[napi]
     pub fn upsert(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> Result<()> {
-        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
-        self.inner.upsert(&id, vec_f32, metadata)
+        self.inner.upsert(&id, to_f32(vector), metadata)
             .map_err(|e| Error::from_reason(e.to_string()))
     }
 
@@ -106,7 +114,7 @@ impl VctrsDatabase {
         }
 
         let items: Vec<_> = ids.into_iter()
-            .zip(vectors.into_iter().map(|v| v.iter().map(|&x| x as f32).collect::<Vec<f32>>()))
+            .zip(to_f32_batch(vectors))
             .zip(metas)
             .map(|((id, vec), meta)| (id, vec, meta))
             .collect();
@@ -128,7 +136,7 @@ impl VctrsDatabase {
         where_filter: Option<serde_json::Value>,
         max_distance: Option<f64>,
     ) -> Result<Vec<SearchResult>> {
-        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
+        let vec_f32 = to_f32(vector);
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
@@ -151,10 +159,7 @@ impl VctrsDatabase {
         where_filter: Option<serde_json::Value>,
         max_distance: Option<f64>,
     ) -> Result<Vec<Vec<SearchResult>>> {
-        let vecs_f32: Vec<Vec<f32>> = vectors
-            .iter()
-            .map(|v| v.iter().map(|&x| x as f32).collect())
-            .collect();
+        let vecs_f32 = to_f32_batch(vectors);
         let queries: Vec<&[f32]> = vecs_f32.iter().map(|v| v.as_slice()).collect();
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
@@ -184,7 +189,7 @@ impl VctrsDatabase {
         }
 
         let items: Vec<_> = ids.into_iter()
-            .zip(vectors.into_iter().map(|v| v.iter().map(|&x| x as f32).collect::<Vec<f32>>()))
+            .zip(to_f32_batch(vectors))
             .zip(metas)
             .map(|((id, vec), meta)| (id, vec, meta))
             .collect();
@@ -206,7 +211,7 @@ impl VctrsDatabase {
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
         Ok(GetResult {
-            vector: vector.iter().map(|&v| v as f64).collect(),
+            vector: to_f64(vector),
             metadata,
         })
     }
@@ -231,7 +236,7 @@ impl VctrsDatabase {
         vector: Option<Vec<f64>>,
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
-        let vec = vector.map(|v| v.iter().map(|&x| x as f32).collect());
+        let vec = vector.map(to_f32);
         let meta = metadata.map(Some);
         self.inner.update(&id, vec, meta)
             .map_err(|e| Error::from_reason(e.to_string()))
@@ -338,11 +343,10 @@ impl VctrsDatabase {
     /// Async version of add. Returns a Promise.
     #[napi]
     pub fn add_async(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> AsyncTask<AddTask> {
-        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
         AsyncTask::new(AddTask {
             db: Arc::clone(&self.inner),
             id,
-            vector: vec_f32,
+            vector: to_f32(vector),
             metadata,
         })
     }
@@ -350,11 +354,10 @@ impl VctrsDatabase {
     /// Async version of upsert. Returns a Promise.
     #[napi]
     pub fn upsert_async(&self, id: String, vector: Vec<f64>, metadata: Option<serde_json::Value>) -> AsyncTask<UpsertTask> {
-        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
         AsyncTask::new(UpsertTask {
             db: Arc::clone(&self.inner),
             id,
-            vector: vec_f32,
+            vector: to_f32(vector),
             metadata,
         })
     }
@@ -374,7 +377,7 @@ impl VctrsDatabase {
             )));
         }
         let items: Vec<_> = ids.into_iter()
-            .zip(vectors.into_iter().map(|v| v.iter().map(|&x| x as f32).collect::<Vec<f32>>()))
+            .zip(to_f32_batch(vectors))
             .zip(metas)
             .map(|((id, vec), meta)| (id, vec, meta))
             .collect();
@@ -395,7 +398,6 @@ impl VctrsDatabase {
         where_filter: Option<serde_json::Value>,
         max_distance: Option<f64>,
     ) -> Result<AsyncTask<SearchTask>> {
-        let vec_f32: Vec<f32> = vector.iter().map(|&v| v as f32).collect();
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
@@ -403,7 +405,7 @@ impl VctrsDatabase {
 
         Ok(AsyncTask::new(SearchTask {
             db: Arc::clone(&self.inner),
-            query: vec_f32,
+            query: to_f32(vector),
             k,
             ef,
             filter,
@@ -421,10 +423,7 @@ impl VctrsDatabase {
         where_filter: Option<serde_json::Value>,
         max_distance: Option<f64>,
     ) -> Result<AsyncTask<SearchManyTask>> {
-        let vecs_f32: Vec<Vec<f32>> = vectors
-            .iter()
-            .map(|v| v.iter().map(|&x| x as f32).collect())
-            .collect();
+        let vecs_f32 = to_f32_batch(vectors);
         let k = k.unwrap_or(10) as usize;
         let ef = ef_search.map(|e| e as usize);
         let filter = where_filter.as_ref().map(parse_js_filter).transpose()?;
@@ -455,7 +454,7 @@ impl VctrsDatabase {
             )));
         }
         let items: Vec<_> = ids.into_iter()
-            .zip(vectors.into_iter().map(|v| v.iter().map(|&x| x as f32).collect::<Vec<f32>>()))
+            .zip(to_f32_batch(vectors))
             .zip(metas)
             .map(|((id, vec), meta)| (id, vec, meta))
             .collect();
@@ -481,175 +480,127 @@ impl VctrsDatabase {
 
 // -- AsyncTask implementations ------------------------------------------------
 
-pub struct AddTask {
+macro_rules! async_task {
+    // Simple task: compute returns (), resolve returns ()
+    ($name:ident { $($field:ident : $type:ty),* $(,)? } => $compute:expr) => {
+        pub struct $name { $($field: $type),* }
+
+        #[napi]
+        impl Task for $name {
+            type Output = ();
+            type JsValue = ();
+
+            fn compute(&mut self) -> Result<Self::Output> {
+                $compute(self)
+            }
+
+            fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+                Ok(())
+            }
+        }
+    };
+    // Task with typed output
+    ($name:ident { $($field:ident : $type:ty),* $(,)? } => $output:ty, $jsval:ty, $compute:expr, $resolve:expr) => {
+        pub struct $name { $($field: $type),* }
+
+        #[napi]
+        impl Task for $name {
+            type Output = $output;
+            type JsValue = $jsval;
+
+            fn compute(&mut self) -> Result<Self::Output> {
+                $compute(self)
+            }
+
+            fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+                $resolve(output)
+            }
+        }
+    };
+}
+
+async_task!(AddTask {
     db: Arc<Database>,
     id: String,
     vector: Vec<f32>,
     metadata: Option<serde_json::Value>,
-}
+} => |t: &mut AddTask| {
+    t.db.add(&t.id, std::mem::take(&mut t.vector), t.metadata.take())
+        .map_err(|e| Error::from_reason(e.to_string()))
+});
 
-#[napi]
-impl Task for AddTask {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.db.add(&self.id, std::mem::take(&mut self.vector), self.metadata.take())
-            .map_err(|e| Error::from_reason(e.to_string()))
-    }
-
-    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
-        Ok(())
-    }
-}
-
-pub struct UpsertTask {
+async_task!(UpsertTask {
     db: Arc<Database>,
     id: String,
     vector: Vec<f32>,
     metadata: Option<serde_json::Value>,
-}
+} => |t: &mut UpsertTask| {
+    t.db.upsert(&t.id, std::mem::take(&mut t.vector), t.metadata.take())
+        .map_err(|e| Error::from_reason(e.to_string()))
+});
 
-#[napi]
-impl Task for UpsertTask {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.db.upsert(&self.id, std::mem::take(&mut self.vector), self.metadata.take())
-            .map_err(|e| Error::from_reason(e.to_string()))
-    }
-
-    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
-        Ok(())
-    }
-}
-
-pub struct AddManyTask {
+async_task!(AddManyTask {
     db: Arc<Database>,
     items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
-}
+} => |t: &mut AddManyTask| {
+    t.db.add_many(std::mem::take(&mut t.items))
+        .map_err(|e| Error::from_reason(e.to_string()))
+});
 
-#[napi]
-impl Task for AddManyTask {
-    type Output = ();
-    type JsValue = ();
+async_task!(UpsertManyTask {
+    db: Arc<Database>,
+    items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
+} => |t: &mut UpsertManyTask| {
+    t.db.upsert_many(std::mem::take(&mut t.items))
+        .map_err(|e| Error::from_reason(e.to_string()))
+});
 
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.db.add_many(std::mem::take(&mut self.items))
-            .map_err(|e| Error::from_reason(e.to_string()))
-    }
+async_task!(SaveTask {
+    db: Arc<Database>,
+} => |t: &mut SaveTask| {
+    t.db.save().map_err(|e| Error::from_reason(e.to_string()))
+});
 
-    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
-        Ok(())
-    }
-}
-
-pub struct SearchTask {
+async_task!(SearchTask {
     db: Arc<Database>,
     query: Vec<f32>,
     k: usize,
     ef: Option<usize>,
     filter: Option<Filter>,
     max_distance: Option<f32>,
-}
-
-#[napi]
-impl Task for SearchTask {
-    type Output = Vec<vctrs_core::db::SearchResult>;
-    type JsValue = Vec<SearchResult>;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.db.search(&self.query, self.k, self.ef, self.filter.as_ref(), self.max_distance)
+} => Vec<vctrs_core::db::SearchResult>, Vec<SearchResult>,
+    |t: &mut SearchTask| {
+        t.db.search(&t.query, t.k, t.ef, t.filter.as_ref(), t.max_distance)
             .map_err(|e| Error::from_reason(e.to_string()))
-    }
+    },
+    |output| Ok(convert_results(output))
+);
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(convert_results(output))
-    }
-}
-
-pub struct SearchManyTask {
+async_task!(SearchManyTask {
     db: Arc<Database>,
     queries: Vec<Vec<f32>>,
     k: usize,
     ef: Option<usize>,
     filter: Option<Filter>,
     max_distance: Option<f32>,
-}
-
-#[napi]
-impl Task for SearchManyTask {
-    type Output = Vec<Vec<vctrs_core::db::SearchResult>>;
-    type JsValue = Vec<Vec<SearchResult>>;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let refs: Vec<&[f32]> = self.queries.iter().map(|v| v.as_slice()).collect();
-        self.db.search_many(&refs, self.k, self.ef, self.filter.as_ref(), self.max_distance)
+} => Vec<Vec<vctrs_core::db::SearchResult>>, Vec<Vec<SearchResult>>,
+    |t: &mut SearchManyTask| {
+        let refs: Vec<&[f32]> = t.queries.iter().map(|v| v.as_slice()).collect();
+        t.db.search_many(&refs, t.k, t.ef, t.filter.as_ref(), t.max_distance)
             .map_err(|e| Error::from_reason(e.to_string()))
-    }
+    },
+    |output| Ok(output.into_iter().map(convert_results).collect())
+);
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output.into_iter().map(convert_results).collect())
-    }
-}
-
-pub struct UpsertManyTask {
-    db: Arc<Database>,
-    items: Vec<(String, Vec<f32>, Option<serde_json::Value>)>,
-}
-
-#[napi]
-impl Task for UpsertManyTask {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.db.upsert_many(std::mem::take(&mut self.items))
-            .map_err(|e| Error::from_reason(e.to_string()))
-    }
-
-    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
-        Ok(())
-    }
-}
-
-pub struct SaveTask {
-    db: Arc<Database>,
-}
-
-#[napi]
-impl Task for SaveTask {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.db.save().map_err(|e| Error::from_reason(e.to_string()))
-    }
-
-    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
-        Ok(())
-    }
-}
-
-pub struct DeleteTask {
+async_task!(DeleteTask {
     db: Arc<Database>,
     id: String,
-}
-
-#[napi]
-impl Task for DeleteTask {
-    type Output = bool;
-    type JsValue = bool;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.db.delete(&self.id).map_err(|e| Error::from_reason(e.to_string()))
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
+} => bool, bool,
+    |t: &mut DeleteTask| {
+        t.db.delete(&t.id).map_err(|e| Error::from_reason(e.to_string()))
+    },
+    |output| Ok(output)
+);
 
 // -- Export / Import ----------------------------------------------------------
 
@@ -756,66 +707,12 @@ impl VctrsClient {
 }
 
 fn parse_metric_str(s: &str) -> Result<Metric> {
-    match s {
-        "cosine" => Ok(Metric::Cosine),
-        "euclidean" | "l2" => Ok(Metric::Euclidean),
-        "dot" | "dot_product" => Ok(Metric::DotProduct),
-        other => Err(Error::from_reason(format!(
-            "metric must be 'cosine', 'euclidean'/'l2', or 'dot'/'dot_product', got '{}'", other
-        ))),
-    }
+    Metric::from_str(s).map_err(|e| Error::from_reason(e.to_string()))
 }
 
 // -- Filter parsing -----------------------------------------------------------
 
-/// Parse a JS filter object into a Filter.
 fn parse_js_filter(value: &serde_json::Value) -> Result<Filter> {
-    let obj = value.as_object()
-        .ok_or_else(|| Error::from_reason("where_filter must be an object"))?;
-
-    let mut filters = Vec::new();
-
-    for (key, val) in obj {
-        if let Some(op_obj) = val.as_object() {
-            for (op, op_val) in op_obj {
-                match op.as_str() {
-                    "$ne" => filters.push(Filter::Ne(key.clone(), op_val.clone())),
-                    "$in" => {
-                        let arr = op_val.as_array()
-                            .ok_or_else(|| Error::from_reason("$in value must be an array"))?;
-                        filters.push(Filter::In(key.clone(), arr.clone()));
-                    }
-                    "$gt" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| Error::from_reason("$gt value must be a number"))?;
-                        filters.push(Filter::Gt(key.clone(), n));
-                    }
-                    "$gte" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| Error::from_reason("$gte value must be a number"))?;
-                        filters.push(Filter::Gte(key.clone(), n));
-                    }
-                    "$lt" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| Error::from_reason("$lt value must be a number"))?;
-                        filters.push(Filter::Lt(key.clone(), n));
-                    }
-                    "$lte" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| Error::from_reason("$lte value must be a number"))?;
-                        filters.push(Filter::Lte(key.clone(), n));
-                    }
-                    _ => return Err(Error::from_reason(format!("unknown operator: {}", op))),
-                }
-            }
-        } else {
-            filters.push(Filter::Eq(key.clone(), val.clone()));
-        }
-    }
-
-    if filters.len() == 1 {
-        Ok(filters.into_iter().next().unwrap())
-    } else {
-        Ok(Filter::And(filters))
-    }
+    vctrs_core::filter::parse_json_filter(value)
+        .map_err(|e| Error::from_reason(e.to_string()))
 }

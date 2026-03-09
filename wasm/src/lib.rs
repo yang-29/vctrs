@@ -1,5 +1,6 @@
-use vctrs_core::db::{Database, Filter};
+use vctrs_core::db::Database;
 use vctrs_core::distance::Metric;
+use vctrs_core::filter::Filter;
 use wasm_bindgen::prelude::*;
 
 fn js_to_json(val: &JsValue) -> Option<serde_json::Value> {
@@ -45,12 +46,7 @@ impl SearchResult {
 }
 
 fn parse_metric(s: &str) -> Result<Metric, JsValue> {
-    match s {
-        "cosine" => Ok(Metric::Cosine),
-        "euclidean" | "l2" => Ok(Metric::Euclidean),
-        "dot" | "dot_product" => Ok(Metric::DotProduct),
-        _ => Err(JsValue::from_str(&format!("unknown metric: {}", s))),
-    }
+    Metric::from_str(s).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[wasm_bindgen]
@@ -223,55 +219,7 @@ impl VctrsDatabase {
     }
 }
 
-/// Parse a JS filter object into a Filter.
 fn parse_json_filter(value: &serde_json::Value) -> Result<Filter, JsValue> {
-    let obj = value.as_object()
-        .ok_or_else(|| JsValue::from_str("filter must be an object"))?;
-
-    let mut filters = Vec::new();
-
-    for (key, val) in obj {
-        if let Some(op_obj) = val.as_object() {
-            for (op, op_val) in op_obj {
-                match op.as_str() {
-                    "$eq" => filters.push(Filter::Eq(key.clone(), op_val.clone())),
-                    "$ne" => filters.push(Filter::Ne(key.clone(), op_val.clone())),
-                    "$in" => {
-                        let arr = op_val.as_array()
-                            .ok_or_else(|| JsValue::from_str("$in value must be an array"))?;
-                        filters.push(Filter::In(key.clone(), arr.clone()));
-                    }
-                    "$gt" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| JsValue::from_str("$gt must be a number"))?;
-                        filters.push(Filter::Gt(key.clone(), n));
-                    }
-                    "$gte" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| JsValue::from_str("$gte must be a number"))?;
-                        filters.push(Filter::Gte(key.clone(), n));
-                    }
-                    "$lt" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| JsValue::from_str("$lt must be a number"))?;
-                        filters.push(Filter::Lt(key.clone(), n));
-                    }
-                    "$lte" => {
-                        let n = op_val.as_f64()
-                            .ok_or_else(|| JsValue::from_str("$lte must be a number"))?;
-                        filters.push(Filter::Lte(key.clone(), n));
-                    }
-                    _ => return Err(JsValue::from_str(&format!("unknown operator: {}", op))),
-                }
-            }
-        } else {
-            filters.push(Filter::Eq(key.clone(), val.clone()));
-        }
-    }
-
-    if filters.len() == 1 {
-        Ok(filters.into_iter().next().unwrap())
-    } else {
-        Ok(Filter::And(filters))
-    }
+    vctrs_core::filter::parse_json_filter(value)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }

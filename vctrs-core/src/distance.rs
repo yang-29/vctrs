@@ -72,6 +72,19 @@ pub enum Metric {
     DotProduct,
 }
 
+impl Metric {
+    /// Parse a metric name from a string.
+    /// Accepts: "cosine", "euclidean"/"l2", "dot"/"dot_product".
+    pub fn from_str(s: &str) -> Result<Self, crate::VctrsError> {
+        match s {
+            "cosine" => Ok(Metric::Cosine),
+            "euclidean" | "l2" => Ok(Metric::Euclidean),
+            "dot" | "dot_product" => Ok(Metric::DotProduct),
+            _ => Err(crate::VctrsError::InvalidMetric(s.to_string())),
+        }
+    }
+}
+
 /// Scalar fallback for cosine distance.
 fn cosine_distance_scalar(a: &[f32], b: &[f32]) -> f32 {
     let mut dot = 0.0f64;

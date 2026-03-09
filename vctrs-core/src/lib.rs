@@ -1,5 +1,6 @@
 pub mod distance;
 pub mod error;
+pub mod filter;
 pub mod hnsw;
 pub mod quantize;
 pub mod storage;
@@ -9,3 +10,4 @@ pub mod client;
 pub mod export;
 
 pub use error::{VctrsError, Result};
+pub use filter::{Filter, parse_json_filter};

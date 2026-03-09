@@ -1,5 +1,6 @@
-use vctrs_core::db::{Database, Filter, HnswConfig};
+use vctrs_core::db::{Database, HnswConfig};
 use vctrs_core::distance::Metric;
+use vctrs_core::filter::Filter;
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
@@ -70,14 +71,8 @@ impl PyDatabase {
         }
 
         let dim = dim.unwrap();
-        let metric_enum = match metric.unwrap_or("cosine") {
-            "cosine" => Metric::Cosine,
-            "euclidean" | "l2" => Metric::Euclidean,
-            "dot" | "dot_product" => Metric::DotProduct,
-            _ => return Err(PyValueError::new_err(
-                "metric must be 'cosine', 'euclidean'/'l2', or 'dot'/'dot_product'"
-            )),
-        };
+        let metric_enum = Metric::from_str(metric.unwrap_or("cosine"))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         let config = HnswConfig {
             m: m.unwrap_or(16),
@@ -463,81 +458,11 @@ impl PyDatabase {
 // -- Filter parsing from Python dicts -----------------------------------------
 
 /// Parse a Python filter dict into a Filter.
-/// Supports: {"field": "value"}, {"field": {"$ne": "value"}}, {"field": {"$in": [...]}}
-/// Multiple keys = AND.
+/// Converts the dict to serde_json::Value and delegates to vctrs_core::filter::parse_json_filter.
 fn parse_filter(dict: &Bound<'_, PyDict>) -> PyResult<Filter> {
-    let mut filters = Vec::new();
-
-    for (key, value) in dict.iter() {
-        let key_str: String = key.extract()?;
-
-        // Check if value is a dict with operators.
-        if let Ok(op_dict) = value.downcast::<PyDict>() {
-            for (op_key, op_val) in op_dict.iter() {
-                let op: String = op_key.extract()?;
-                match op.as_str() {
-                    "$ne" => {
-                        let val = py_to_json(&op_val)?;
-                        filters.push(Filter::Ne(key_str.clone(), val));
-                    }
-                    "$in" => {
-                        let list = op_val.downcast::<PyList>()
-                            .map_err(|_| PyValueError::new_err("$in value must be a list"))?;
-                        let vals: Vec<serde_json::Value> = list.iter()
-                            .map(|item| py_to_json(&item))
-                            .collect::<PyResult<_>>()?;
-                        filters.push(Filter::In(key_str.clone(), vals));
-                    }
-                    "$gt" => {
-                        let n: f64 = op_val.extract()
-                            .map_err(|_| PyValueError::new_err("$gt value must be a number"))?;
-                        filters.push(Filter::Gt(key_str.clone(), n));
-                    }
-                    "$gte" => {
-                        let n: f64 = op_val.extract()
-                            .map_err(|_| PyValueError::new_err("$gte value must be a number"))?;
-                        filters.push(Filter::Gte(key_str.clone(), n));
-                    }
-                    "$lt" => {
-                        let n: f64 = op_val.extract()
-                            .map_err(|_| PyValueError::new_err("$lt value must be a number"))?;
-                        filters.push(Filter::Lt(key_str.clone(), n));
-                    }
-                    "$lte" => {
-                        let n: f64 = op_val.extract()
-                            .map_err(|_| PyValueError::new_err("$lte value must be a number"))?;
-                        filters.push(Filter::Lte(key_str.clone(), n));
-                    }
-                    _ => return Err(PyValueError::new_err(format!("unknown operator: {}", op))),
-                }
-            }
-        } else {
-            let val = py_to_json(&value)?;
-            filters.push(Filter::Eq(key_str, val));
-        }
-    }
-
-    if filters.len() == 1 {
-        Ok(filters.into_iter().next().unwrap())
-    } else {
-        Ok(Filter::And(filters))
-    }
-}
-
-fn py_to_json(obj: &Bound<'_, pyo3::types::PyAny>) -> PyResult<serde_json::Value> {
-    if let Ok(s) = obj.extract::<String>() {
-        Ok(serde_json::Value::String(s))
-    } else if let Ok(i) = obj.extract::<i64>() {
-        Ok(serde_json::Value::Number(i.into()))
-    } else if let Ok(f) = obj.extract::<f64>() {
-        Ok(serde_json::json!(f))
-    } else if let Ok(b) = obj.extract::<bool>() {
-        Ok(serde_json::Value::Bool(b))
-    } else if obj.is_none() {
-        Ok(serde_json::Value::Null)
-    } else {
-        Err(PyValueError::new_err("unsupported filter value type"))
-    }
+    let json_val = pythonize_dict(dict)?;
+    vctrs_core::filter::parse_json_filter(&json_val)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 // -- Vector input helpers -----------------------------------------------------
@@ -665,14 +590,7 @@ impl PyClient {
 }
 
 fn parse_metric(s: &str) -> PyResult<Metric> {
-    match s {
-        "cosine" => Ok(Metric::Cosine),
-        "euclidean" | "l2" => Ok(Metric::Euclidean),
-        "dot" | "dot_product" => Ok(Metric::DotProduct),
-        _ => Err(PyValueError::new_err(
-            "metric must be 'cosine', 'euclidean'/'l2', or 'dot'/'dot_product'"
-        )),
-    }
+    Metric::from_str(s).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 #[pymodule]

@@ -30,8 +30,9 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tower_http::cors::CorsLayer;
 use vctrs_core::client::Client;
-use vctrs_core::db::{Database, Filter, HnswConfig};
+use vctrs_core::db::{Database, HnswConfig};
 use vctrs_core::distance::Metric;
+use vctrs_core::filter::Filter;
 
 #[derive(Parser)]
 #[command(name = "vctrs-server", about = "HTTP server for vctrs vector database")]
@@ -274,58 +275,12 @@ async fn collection_stats(
 // -- Filter parsing -----------------------------------------------------------
 
 fn parse_metric(s: &str) -> Result<Metric, String> {
-    match s {
-        "cosine" => Ok(Metric::Cosine),
-        "euclidean" | "l2" => Ok(Metric::Euclidean),
-        "dot" | "dot_product" => Ok(Metric::DotProduct),
-        _ => Err(format!("invalid metric: {}", s)),
-    }
+    Metric::from_str(s).map_err(|e| e.to_string())
 }
 
 fn parse_json_filter(value: &serde_json::Value) -> Result<Filter, String> {
-    let obj = value.as_object().ok_or("filter must be an object")?;
-    let mut filters = Vec::new();
-
-    for (key, val) in obj {
-        if let Some(op_obj) = val.as_object() {
-            for (op, op_val) in op_obj {
-                match op.as_str() {
-                    "$eq" => filters.push(Filter::Eq(key.clone(), op_val.clone())),
-                    "$ne" => filters.push(Filter::Ne(key.clone(), op_val.clone())),
-                    "$in" => {
-                        let arr = op_val.as_array()
-                            .ok_or("$in value must be an array")?;
-                        filters.push(Filter::In(key.clone(), arr.clone()));
-                    }
-                    "$gt" => {
-                        let n = op_val.as_f64().ok_or("$gt must be a number")?;
-                        filters.push(Filter::Gt(key.clone(), n));
-                    }
-                    "$gte" => {
-                        let n = op_val.as_f64().ok_or("$gte must be a number")?;
-                        filters.push(Filter::Gte(key.clone(), n));
-                    }
-                    "$lt" => {
-                        let n = op_val.as_f64().ok_or("$lt must be a number")?;
-                        filters.push(Filter::Lt(key.clone(), n));
-                    }
-                    "$lte" => {
-                        let n = op_val.as_f64().ok_or("$lte must be a number")?;
-                        filters.push(Filter::Lte(key.clone(), n));
-                    }
-                    _ => return Err(format!("unknown operator: {}", op)),
-                }
-            }
-        } else {
-            filters.push(Filter::Eq(key.clone(), val.clone()));
-        }
-    }
-
-    if filters.len() == 1 {
-        Ok(filters.into_iter().next().unwrap())
-    } else {
-        Ok(Filter::And(filters))
-    }
+    vctrs_core::filter::parse_json_filter(value)
+        .map_err(|e| e.to_string())
 }
 
 // -- Main ---------------------------------------------------------------------
